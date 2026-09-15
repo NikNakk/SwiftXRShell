@@ -4,6 +4,10 @@ import SwiftXR
 
 @MainActor
 final class ShellDesktopMode {
+    private static let desktopWidthEnvironmentVariable = "SWIFTXR_DESKTOP_WIDTH_METERS"
+    private static let minimumDesktopWidthMeters: Float = 0.75
+    private static let maximumDesktopWidthMeters: Float = 8.0
+
     private let session: XRSession
     private let swapchain: XRSwapchain
     private let onRequestHome: () -> Void
@@ -36,10 +40,12 @@ final class ShellDesktopMode {
                 let capture = try await DesktopCapture.primaryDisplay(device: session.device)
                 try Task.checkCancellation()
 
+                let widthMeters = Self.configuredDesktopWidthMeters()
                 let renderer = try DesktopRenderer(
                     device: session.device,
                     swapchain: swapchain,
-                    capturedPixelSize: capture.pixelSize
+                    capturedPixelSize: capture.pixelSize,
+                    widthMeters: widthMeters
                 )
                 try await capture.start()
                 try Task.checkCancellation()
@@ -50,6 +56,13 @@ final class ShellDesktopMode {
                 print(
                     "[desktop] capture started: " +
                     "\(capture.display.width)x\(capture.display.height)"
+                )
+                print(
+                    String(
+                        format: "[desktop] panel size: %.2f m × %.2f m",
+                        renderer.geometry.widthMeters,
+                        renderer.geometry.heightMeters
+                    )
                 )
                 print("[desktop] Escape returns to SwiftXR Shell Home")
             } catch is CancellationError {
@@ -96,6 +109,19 @@ final class ShellDesktopMode {
                 )
             }
         }
+    }
+
+    private static func configuredDesktopWidthMeters() -> Float {
+        let environment = ProcessInfo.processInfo.environment
+        guard
+            let value = environment[desktopWidthEnvironmentVariable],
+            let width = Float(value),
+            width.isFinite
+        else {
+            return DesktopRenderer.defaultWidthMeters
+        }
+
+        return min(max(width, minimumDesktopWidthMeters), maximumDesktopWidthMeters)
     }
 
     private static func clearFrame(
