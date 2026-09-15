@@ -10,11 +10,11 @@ private final class HiddenYouTubeBrowserWindow: NSWindow {
 
 @MainActor
 final class YouTubeBrowserController: NSObject {
-    static let width: CGFloat = 1280
-    static let height: CGFloat = 720
+    static let width: CGFloat = 1440
+    static let height: CGFloat = 810
 
-    private static let snapshotInterval: TimeInterval = 1.0 / 30.0
-    private static let scrollScale: Double = 650
+    private static let snapshotInterval: TimeInterval = 1.0 / 45.0
+    private static let scrollScale: Double = 900
 
     private let webView: WKWebView
     private let window: HiddenYouTubeBrowserWindow
@@ -24,8 +24,9 @@ final class YouTubeBrowserController: NSObject {
     private var lastSnapshot = Date.distantPast
     private var textInputFocused = false
     private var isShutdown = false
-    private var pendingScrollY: Double = 0
+    private var pendingScrollImpulse: Double = 0
     private var scrollEvaluationPending = false
+    private var scrollActiveUntil = Date.distantPast
 
     var onSnapshot: ((NSImage?) -> Void)?
     var onLaunchURL: ((String) -> Void)?
@@ -109,16 +110,21 @@ final class YouTubeBrowserController: NSObject {
 
     func close() {
         textInputFocused = false
-        pendingScrollY = 0
+        pendingScrollImpulse = 0
+        scrollActiveUntil = .distantPast
         window.orderOut(nil)
     }
 
     func tick() {
         guard !isShutdown else { return }
         flushPendingScrollIfNeeded()
-        guard !snapshotPending, !scrollEvaluationPending else { return }
 
         let now = Date()
+        if now < scrollActiveUntil {
+            needsSnapshot = true
+        }
+
+        guard !snapshotPending else { return }
         guard needsSnapshot || now.timeIntervalSince(lastSnapshot) >= Self.snapshotInterval else {
             return
         }
@@ -157,7 +163,7 @@ final class YouTubeBrowserController: NSObject {
           const y = \(String(format: "%.1f", y));
           const deepElementFromPoint = (root, px, py) => {
             let e = root.elementFromPoint ? root.elementFromPoint(px, py) : null;
-            let visited = new Set();
+            const visited = new Set();
             while (e && e.shadowRoot && !visited.has(e)) {
               visited.add(e);
               const inner = e.shadowRoot.elementFromPoint ? e.shadowRoot.elementFromPoint(px, py) : null;
@@ -202,8 +208,11 @@ final class YouTubeBrowserController: NSObject {
     func scroll(_ delta: SIMD2<Float>) {
         guard !isShutdown else { return }
         let amount = -Double(delta.y) * Self.scrollScale
-        guard abs(amount) > 0.25 else { return }
-        pendingScrollY = min(max(pendingScrollY + amount, -1600), 1600)
+        guard abs(amount) > 0.15 else { return }
+
+        pendingScrollImpulse = min(max(pendingScrollImpulse + amount, -1800), 1800)
+        scrollActiveUntil = Date().addingTimeInterval(0.9)
+        needsSnapshot = true
         flushPendingScrollIfNeeded()
     }
 
@@ -219,12 +228,12 @@ final class YouTubeBrowserController: NSObject {
     }
 
     private func flushPendingScrollIfNeeded() {
-        guard !scrollEvaluationPending, abs(pendingScrollY) > 0.5 else { return }
-        let amount = min(max(pendingScrollY, -600), 600)
-        pendingScrollY -= amount
+        guard !scrollEvaluationPending, abs(pendingScrollImpulse) > 0.5 else { return }
+        let impulse = min(max(pendingScrollImpulse, -900), 900)
+        pendingScrollImpulse -= impulse
         scrollEvaluationPending = true
 
-        let script = "window.scrollBy({left:0, top:\(String(format: "%.1f", amount)), behavior:'instant'});"
+        let script = "window.__swiftXRScrollImpulse && window.__swiftXRScrollImpulse(\(String(format: "%.1f", impulse)));"
         webView.evaluateJavaScript(script) { [weak self] _, _ in
             Task { @MainActor in
                 guard let self else { return }
@@ -244,6 +253,48 @@ final class YouTubeBrowserController: NSObject {
     private static let injectionScript = #"""
     (() => {
       const BUTTON_ID = 'swiftxr-psvr2-play-button';
+      const STYLE_ID = 'swiftxr-youtube-style';
+      const SCROLL_STATE = '__swiftXRScrollState';
+
+      const installStyle = () => {
+        if (document.getElementById(STYLE_ID)) return;
+        const style = document.createElement('style');
+        style.id = STYLE_ID;
+        style.textContent = `
+          html { color-scheme: dark; background: #0f0f0f !important; }
+          body { background: #0f0f0f !important; }
+          ytd-mini-guide-renderer { display: none !important; }
+          ytd-app[mini-guide-visible] ytd-page-manager.ytd-app,
+          ytd-app[guide-persistent-and-visible] ytd-page-manager.ytd-app {
+            margin-left: 0 !important;
+          }
+          #guide { display: none !important; }
+          ytd-popup-container tp-yt-paper-dialog { max-width: 90vw !important; }
+        `;
+        document.documentElement.appendChild(style);
+      };
+
+      const installSmoothScroll = () => {
+        if (window[SCROLL_STATE]) return;
+        const state = { velocity: 0, running: true };
+        window[SCROLL_STATE] = state;
+        window.__swiftXRScrollImpulse = amount => {
+          const impulse = Math.max(-900, Math.min(900, Number(amount) || 0));
+          state.velocity = Math.max(-72, Math.min(72, state.velocity + impulse * 0.085));
+        };
+        const frame = () => {
+          if (!state.running) return;
+          if (Math.abs(state.velocity) > 0.04) {
+            const root = document.scrollingElement || document.documentElement;
+            if (root) root.scrollTop += state.velocity;
+            state.velocity *= 0.885;
+            if (Math.abs(state.velocity) < 0.04) state.velocity = 0;
+          }
+          requestAnimationFrame(frame);
+        };
+        requestAnimationFrame(frame);
+      };
+
       const isPlayableURL = value => {
         try {
           const u = new URL(value, location.href);
@@ -268,6 +319,8 @@ final class YouTubeBrowserController: NSObject {
       }, true);
 
       const install = () => {
+        installStyle();
+        installSmoothScroll();
         document.querySelectorAll('video').forEach(v => { v.muted = true; v.pause(); });
         const onVideo = location.pathname === '/watch' || location.pathname.startsWith('/shorts/');
         let button = document.getElementById(BUTTON_ID);
@@ -280,9 +333,9 @@ final class YouTubeBrowserController: NSObject {
           button.id = BUTTON_ID;
           button.textContent = '🥽 Play in PSVR2';
           Object.assign(button.style, {
-            position: 'fixed', right: '24px', bottom: '76px', zIndex: '2147483647',
-            border: '1px solid rgba(255,255,255,.32)', borderRadius: '14px',
-            padding: '13px 18px', color: 'white', background: 'rgba(92,107,242,.96)',
+            position: 'fixed', right: '24px', bottom: '24px', zIndex: '2147483647',
+            border: '1px solid rgba(255,255,255,.32)', borderRadius: '18px',
+            padding: '14px 20px', color: 'white', background: 'rgba(92,107,242,.96)',
             font: '600 16px -apple-system, BlinkMacSystemFont, sans-serif',
             boxShadow: '0 8px 28px rgba(0,0,0,.38)', cursor: 'pointer'
           });
