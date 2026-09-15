@@ -171,20 +171,34 @@ struct VideoControlsView: View {
 
     @ViewBuilder
     private func projectionButton(_ title: String, _ mode: VideoProjectionMode) -> some View {
-        Button(title) {
-            model.projectionMode = mode
-            model.send(.setProjection(mode))
+        if model.projectionMode == mode {
+            Button(title) {
+                model.send(.setProjection(mode))
+            }
+            .buttonStyle(.borderedProminent)
+        } else {
+            Button(title) {
+                model.projectionMode = mode
+                model.send(.setProjection(mode))
+            }
+            .buttonStyle(.bordered)
         }
-        .buttonStyle(model.projectionMode == mode ? .borderedProminent : .bordered)
     }
 
     @ViewBuilder
     private func stereoButton(_ layout: VideoStereoLayout) -> some View {
-        Button(layout.shortLabel) {
-            model.stereoLayout = layout
-            model.send(.setStereoLayout(layout))
+        if model.stereoLayout == layout {
+            Button(layout.shortLabel) {
+                model.send(.setStereoLayout(layout))
+            }
+            .buttonStyle(.borderedProminent)
+        } else {
+            Button(layout.shortLabel) {
+                model.stereoLayout = layout
+                model.send(.setStereoLayout(layout))
+            }
+            .buttonStyle(.bordered)
         }
-        .buttonStyle(model.stereoLayout == layout ? .borderedProminent : .bordered)
     }
 
     private static func timeString(_ seconds: Double) -> String {
