@@ -9,6 +9,7 @@ private struct ShellPanelVertex {
 
 private struct ShellPanelUniforms {
     var viewProjection: simd_float4x4
+    var model: simd_float4x4
     var pointer: SIMD4<Float>
 }
 
@@ -17,6 +18,8 @@ final class ShellPanelRenderer {
     private let vertexBuffer: any MTLBuffer
     private let vertexCount: Int
     private let panelTexture: any MTLTexture
+    private let worldWidth: Float
+    private let distance: Float
 
     var pointerPosition: SIMD2<Float>?
 
@@ -25,9 +28,11 @@ final class ShellPanelRenderer {
         swapchain: XRSwapchain,
         panelTexture: any MTLTexture,
         worldWidth: Float = 2.40,
-        distance: Float = 1.80
+        distance: Float = ShellStageAnchor.defaultDistance
     ) throws {
         self.panelTexture = panelTexture
+        self.worldWidth = worldWidth
+        self.distance = distance
 
         let library = try device.makeLibrary(source: Self.shaderSource, options: nil)
         let descriptor = MTLRenderPipelineDescriptor()
@@ -43,18 +48,13 @@ final class ShellPanelRenderer {
         descriptor.colorAttachments[0].destinationAlphaBlendFactor = .oneMinusSourceAlpha
         pipeline = try device.makeRenderPipelineState(descriptor: descriptor)
 
-        let aspect = Float(panelTexture.height) / Float(panelTexture.width)
-        let halfWidth = worldWidth * 0.5
-        let halfHeight = worldWidth * aspect * 0.5
-        let z = -distance
-
         let vertices: [ShellPanelVertex] = [
-            ShellPanelVertex(position: SIMD3(-halfWidth,  halfHeight, z), uv: SIMD2(0, 0)),
-            ShellPanelVertex(position: SIMD3(-halfWidth, -halfHeight, z), uv: SIMD2(0, 1)),
-            ShellPanelVertex(position: SIMD3( halfWidth, -halfHeight, z), uv: SIMD2(1, 1)),
-            ShellPanelVertex(position: SIMD3(-halfWidth,  halfHeight, z), uv: SIMD2(0, 0)),
-            ShellPanelVertex(position: SIMD3( halfWidth, -halfHeight, z), uv: SIMD2(1, 1)),
-            ShellPanelVertex(position: SIMD3( halfWidth,  halfHeight, z), uv: SIMD2(1, 0)),
+            .init(position: SIMD3(-0.5,  0.5, 0), uv: SIMD2(0, 0)),
+            .init(position: SIMD3(-0.5, -0.5, 0), uv: SIMD2(0, 1)),
+            .init(position: SIMD3( 0.5, -0.5, 0), uv: SIMD2(1, 1)),
+            .init(position: SIMD3(-0.5,  0.5, 0), uv: SIMD2(0, 0)),
+            .init(position: SIMD3( 0.5, -0.5, 0), uv: SIMD2(1, 1)),
+            .init(position: SIMD3( 0.5,  0.5, 0), uv: SIMD2(1, 0)),
         ]
         vertexCount = vertices.count
 
@@ -79,6 +79,13 @@ final class ShellPanelRenderer {
     ) throws {
         guard frame.views.count >= 2 else { return }
 
+        let textureAspect = Float(panelTexture.width) / Float(max(panelTexture.height, 1))
+        let model = ShellStageAnchor.shared.modelMatrix(
+            worldWidth: worldWidth,
+            textureAspect: textureAspect,
+            distance: distance
+        )
+
         for eye in 0..<2 {
             let pass = MTLRenderPassDescriptor()
             pass.colorAttachments[0].texture = texture
@@ -99,11 +106,12 @@ final class ShellPanelRenderer {
             let pointer = pointerPosition ?? .zero
             var uniforms = ShellPanelUniforms(
                 viewProjection: frame.views[eye].viewProjectionMatrix(nearZ: 0.05, farZ: 20),
+                model: model,
                 pointer: SIMD4(
                     pointer.x,
                     pointer.y,
                     pointerPosition == nil ? 0 : 1,
-                    Float(panelTexture.width) / Float(panelTexture.height)
+                    textureAspect
                 )
             )
 
@@ -137,6 +145,7 @@ final class ShellPanelRenderer {
 
     struct ShellPanelUniforms {
         float4x4 viewProjection;
+        float4x4 model;
         float4 pointer;
     };
 
@@ -152,7 +161,7 @@ final class ShellPanelRenderer {
     {
         ShellPanelVertexOut output;
         ShellPanelVertex input = vertices[vertexID];
-        output.position = uniforms.viewProjection * float4(input.position, 1.0);
+        output.position = uniforms.viewProjection * uniforms.model * float4(input.position, 1.0);
         output.uv = input.uv;
         return output;
     }
