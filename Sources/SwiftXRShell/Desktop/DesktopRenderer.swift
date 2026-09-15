@@ -11,7 +11,7 @@ struct DesktopSurfaceHit {
 }
 
 struct DesktopSurfaceGeometry {
-    var center = SIMD3<Float>(0, 0, -2.0)
+    var center = SIMD3<Float>(0, 0, -ShellStageAnchor.defaultDistance)
     var widthMeters: Float
     var pixelSize: SIMD2<Int>
 
@@ -100,6 +100,7 @@ private struct DesktopVertex {
 
 private struct DesktopUniforms {
     var viewProjection: simd_float4x4
+    var model: simd_float4x4
 }
 
 final class DesktopRenderer {
@@ -152,14 +153,11 @@ final class DesktopRenderer {
         }
         self.samplerState = sampler
 
-        let halfWidth = geometry.widthMeters * 0.5
-        let halfHeight = geometry.heightMeters * 0.5
-        let c = geometry.center
         let vertices = [
-            DesktopVertex(position: SIMD3(c.x - halfWidth, c.y + halfHeight, c.z), uv: SIMD2(0, 0)),
-            DesktopVertex(position: SIMD3(c.x - halfWidth, c.y - halfHeight, c.z), uv: SIMD2(0, 1)),
-            DesktopVertex(position: SIMD3(c.x + halfWidth, c.y + halfHeight, c.z), uv: SIMD2(1, 0)),
-            DesktopVertex(position: SIMD3(c.x + halfWidth, c.y - halfHeight, c.z), uv: SIMD2(1, 1)),
+            DesktopVertex(position: SIMD3(-0.5,  0.5, 0), uv: SIMD2(0, 0)),
+            DesktopVertex(position: SIMD3(-0.5, -0.5, 0), uv: SIMD2(0, 1)),
+            DesktopVertex(position: SIMD3( 0.5,  0.5, 0), uv: SIMD2(1, 0)),
+            DesktopVertex(position: SIMD3( 0.5, -0.5, 0), uv: SIMD2(1, 1)),
         ]
 
         let buffer = vertices.withUnsafeBufferPointer { pointer -> (any MTLBuffer)? in
@@ -182,6 +180,12 @@ final class DesktopRenderer {
         commandBuffer: any MTLCommandBuffer
     ) throws {
         guard frame.views.count >= 2 else { return }
+
+        let model = ShellStageAnchor.shared.modelMatrix(
+            worldWidth: geometry.widthMeters,
+            textureAspect: geometry.aspectRatio,
+            distance: ShellStageAnchor.defaultDistance
+        )
 
         for eye in 0..<2 {
             let pass = MTLRenderPassDescriptor()
@@ -222,7 +226,8 @@ final class DesktopRenderer {
                     viewProjection: frame.views[eye].viewProjectionMatrix(
                         nearZ: 0.05,
                         farZ: 50
-                    )
+                    ),
+                    model: model
                 )
                 encoder.setVertexBuffer(vertexBuffer, offset: 0, index: 0)
                 encoder.setVertexBytes(
@@ -250,6 +255,7 @@ final class DesktopRenderer {
 
     struct DesktopUniforms {
         float4x4 viewProjection;
+        float4x4 model;
     };
 
     struct DesktopVertexOut {
@@ -264,7 +270,7 @@ final class DesktopRenderer {
     {
         DesktopVertexOut output;
         DesktopVertex input = vertices[vertexID];
-        output.position = uniforms.viewProjection * float4(input.position, 1.0);
+        output.position = uniforms.viewProjection * uniforms.model * float4(input.position, 1.0);
         output.uv = input.uv;
         return output;
     }
