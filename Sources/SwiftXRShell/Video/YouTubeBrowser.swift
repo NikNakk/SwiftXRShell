@@ -13,7 +13,9 @@ final class YouTubeBrowserController: NSObject {
     static let width: CGFloat = 1440
     static let height: CGFloat = 810
 
-    private static let snapshotInterval: TimeInterval = 1.0 / 45.0
+    private static let motionSnapshotInterval: TimeInterval = 1.0 / 45.0
+    private static let typingSnapshotInterval: TimeInterval = 1.0 / 30.0
+    private static let idleSnapshotInterval: TimeInterval = 1.0 / 12.0
     private static let scrollScale: Double = 900
 
     private let webView: WKWebView
@@ -120,12 +122,22 @@ final class YouTubeBrowserController: NSObject {
         flushPendingScrollIfNeeded()
 
         let now = Date()
-        if now < scrollActiveUntil {
+        let scrolling = now < scrollActiveUntil
+        if scrolling {
             needsSnapshot = true
         }
 
+        let interval: TimeInterval
+        if scrolling {
+            interval = Self.motionSnapshotInterval
+        } else if textInputFocused {
+            interval = Self.typingSnapshotInterval
+        } else {
+            interval = Self.idleSnapshotInterval
+        }
+
         guard !snapshotPending else { return }
-        guard needsSnapshot || now.timeIntervalSince(lastSnapshot) >= Self.snapshotInterval else {
+        guard needsSnapshot || now.timeIntervalSince(lastSnapshot) >= interval else {
             return
         }
 
