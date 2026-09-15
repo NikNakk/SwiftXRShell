@@ -13,41 +13,6 @@ private struct VideoControlPanelUniforms {
     var pointer: SIMD4<Float>
 }
 
-private struct VideoControlPanelAnchor {
-    var headPosition: SIMD3<Float>
-    var right: SIMD3<Float>
-    var up: SIMD3<Float>
-    var forward: SIMD3<Float>
-
-    static func from(frame: XRFrame) -> VideoControlPanelAnchor? {
-        guard frame.views.count >= 2 else { return nil }
-        let left = frame.views[0]
-        let rightView = frame.views[1]
-        let q = simd_quatf(
-            ix: left.pose.orientation.x,
-            iy: left.pose.orientation.y,
-            iz: left.pose.orientation.z,
-            r: left.pose.orientation.w
-        )
-        let leftPosition = SIMD3<Float>(
-            left.pose.position.x,
-            left.pose.position.y,
-            left.pose.position.z
-        )
-        let rightPosition = SIMD3<Float>(
-            rightView.pose.position.x,
-            rightView.pose.position.y,
-            rightView.pose.position.z
-        )
-        return VideoControlPanelAnchor(
-            headPosition: (leftPosition + rightPosition) * 0.5,
-            right: simd_normalize(q.act(SIMD3<Float>(1, 0, 0))),
-            up: simd_normalize(q.act(SIMD3<Float>(0, 1, 0))),
-            forward: simd_normalize(q.act(SIMD3<Float>(0, 0, -1)))
-        )
-    }
-}
-
 enum VideoControlPanelRendererError: Error {
     case bufferCreationFailed
     case encoderCreationFailed
@@ -58,7 +23,6 @@ final class VideoControlPanelRenderer {
     private let vertexBuffer: any MTLBuffer
     private let vertexCount: Int
     private let textureAspect: Float
-    private var anchor: VideoControlPanelAnchor?
 
     init(
         device: any MTLDevice,
@@ -104,7 +68,9 @@ final class VideoControlPanelRenderer {
         vertexBuffer = buffer
     }
 
-    func recenter() { anchor = nil }
+    /// The Shell UI itself stays on the persistent shared stage. Recenter still
+    /// recenters immersive video content, but entering a mode never moves the UI.
+    func recenter() {}
 
     func encode(
         frame: XRFrame,
@@ -114,26 +80,19 @@ final class VideoControlPanelRenderer {
         commandBuffer: any MTLCommandBuffer,
         clearBeforePanel: Bool = false,
         worldWidth: Float = 2.0,
-        distance: Float = 1.50,
-        verticalOffset: Float = -0.12
+        distance: Float = ShellStageAnchor.defaultDistance,
+        verticalOffset: Float = 0
     ) throws {
         guard frame.views.count >= 2 else { return }
 
-        if anchor == nil,
-           frame.trackingState.orientationValid,
-           frame.trackingState.positionValid {
-            anchor = VideoControlPanelAnchor.from(frame: frame)
-        }
-        guard let anchor else { return }
-
-        let worldHeight = worldWidth / max(textureAspect, 0.001)
-        let center = anchor.headPosition + anchor.forward * distance + anchor.up * verticalOffset
-        let model = simd_float4x4(columns: (
-            SIMD4(anchor.right * worldWidth, 0),
-            SIMD4(anchor.up * worldHeight, 0),
-            SIMD4(-anchor.forward, 0),
-            SIMD4(center, 1)
-        ))
+        // Use one Shell-owned stage for Home, Video and Desktop. Ignore the
+        // historical per-mode distance/offset arguments so mode switches do not jump.
+        let model = ShellStageAnchor.shared.modelMatrix(
+            worldWidth: worldWidth,
+            textureAspect: textureAspect,
+            distance: ShellStageAnchor.defaultDistance,
+            verticalOffset: 0
+        )
 
         for eye in 0..<2 {
             let pass = MTLRenderPassDescriptor()
