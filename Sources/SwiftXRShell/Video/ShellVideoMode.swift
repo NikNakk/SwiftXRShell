@@ -308,7 +308,7 @@ final class ShellVideoMode {
         verticalOffset: Float
     ) {
         switch mode {
-        case .youtube: return (2.55, 1.50, -0.03)
+        case .youtube: return (2.85, 1.50, -0.03)
         case .files: return (2.15, 1.50, -0.08)
         case .loading: return (2.00, 1.50, -0.08)
         case .controls: return (2.00, 1.50, -0.14)
@@ -342,9 +342,9 @@ final class ShellVideoMode {
             youtubeBrowser.pointerMoved()
         case .pointerUp(.primary):
             guard let point = panel.interaction.pointerPosition else { return }
-            if point.y <= 0.075 && point.x <= 0.12 {
+            if point.y <= 0.075 && point.x <= 0.08 {
                 leaveYouTubeToFiles()
-            } else if point.y <= 0.075 && point.x <= 0.24 {
+            } else if point.y <= 0.075 && point.x <= 0.15 {
                 if !youtubeBrowser.back() { leaveYouTubeToFiles() }
             } else {
                 youtubeBrowser.click(at: point)
