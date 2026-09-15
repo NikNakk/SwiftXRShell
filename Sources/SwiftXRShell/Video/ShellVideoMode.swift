@@ -95,7 +95,7 @@ final class ShellVideoMode {
         }
         youtube.onLaunchURL = { [weak self] url in self?.beginOpenMedia(url) }
 
-        panel.interaction.setExternalHandler { [weak self] event in
+        panel.interaction.handler = { [weak self] event in
             self?.handlePanelInteraction(event)
         }
     }
