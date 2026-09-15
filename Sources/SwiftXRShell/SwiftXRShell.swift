@@ -5,42 +5,28 @@ import SwiftUI
 import SwiftXR
 
 @MainActor
-private func configure(
-    controller: GCController,
-    panel: XRSwiftUIPanel<ShellHomeView>
-) {
-    guard let pad = controller.extendedGamepad else { return }
-
-    func onPress(
-        _ button: GCControllerButtonInput,
-        _ action: @escaping @MainActor () -> Void
-    ) {
-        button.pressedChangedHandler = { _, _, pressed in
-            guard pressed else { return }
-            DispatchQueue.main.async {
-                action()
-            }
-        }
+private final class SwiftXRShellAppDelegate: NSObject, NSApplicationDelegate {
+    private enum Mode {
+        case home
+        case video
+        case desktop
     }
 
-    onPress(pad.dpad.up) { panel.interaction.navigate(.up) }
-    onPress(pad.dpad.down) { panel.interaction.navigate(.down) }
-    onPress(pad.dpad.left) { panel.interaction.navigate(.left) }
-    onPress(pad.dpad.right) { panel.interaction.navigate(.right) }
-    onPress(pad.buttonA) { panel.interaction.select() }
-    onPress(pad.buttonB) { panel.interaction.back() }
-    onPress(pad.buttonMenu) { panel.interaction.select() }
-}
+    private var mode: Mode = .home
 
-@MainActor
-private final class SwiftXRShellAppDelegate: NSObject, NSApplicationDelegate {
     private var instance: XRInstance?
     private var session: XRSession?
     private var swapchain: XRSwapchain?
-    private var panel: XRSwiftUIPanel<ShellHomeView>?
-    private var renderer: ShellPanelRenderer?
-    private var pointerCapture: XRMacPointerCapture?
-    private var configuredController: GCController?
+
+    private var homePanel: XRSwiftUIPanel<ShellHomeView>?
+    private var homeRenderer: ShellPanelRenderer?
+    private var homePointerCapture: XRMacPointerCapture?
+    private var configuredHomeController: GCController?
+
+    private var videoMode: ShellVideoMode?
+    private var desktopMode: ShellDesktopMode?
+    private var desktopEscapeMonitor: Any?
+
     private var exitRequested = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -59,14 +45,24 @@ private final class SwiftXRShellAppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidBecomeActive(_ notification: Notification) {
         do {
-            try startPointerCaptureIfReady()
+            switch mode {
+            case .home:
+                try startHomePointerCaptureIfReady()
+            case .video:
+                break
+            case .desktop:
+                break
+            }
         } catch {
             fail(error)
         }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
-        pointerCapture?.stop()
+        removeDesktopEscapeMonitor()
+        homePointerCapture?.stop()
+        videoMode?.shutdown()
+        desktopMode?.deactivate()
         if session?.isRunning == true && !exitRequested {
             try? session?.requestExit()
         }
@@ -84,18 +80,6 @@ private final class SwiftXRShellAppDelegate: NSObject, NSApplicationDelegate {
         let session = try instance.system().makeSession()
         let swapchain = try session.makeStereoSwapchain()
         let model = ShellModel()
-
-        model.commandHandler = { command in
-            switch command {
-            case let .launch(application):
-                // Video and Desktop are intentionally modeled as normal Shell
-                // applications. Their implementations will migrate into this
-                // repository next, without changing the Home surface.
-                print("Shell launch requested: \(application.title) [\(application.id)]")
-            case .settings:
-                print("Shell settings requested")
-            }
-        }
 
         let panel = try XRSwiftUIPanel(
             device: session.device,
@@ -115,36 +99,126 @@ private final class SwiftXRShellAppDelegate: NSObject, NSApplicationDelegate {
         self.instance = instance
         self.session = session
         self.swapchain = swapchain
-        self.panel = panel
-        self.renderer = renderer
-        self.pointerCapture = pointerCapture
+        self.homePanel = panel
+        self.homeRenderer = renderer
+        self.homePointerCapture = pointerCapture
+
+        model.commandHandler = { [weak self] command in
+            guard let self else { return }
+            switch command {
+            case let .launch(application):
+                do {
+                    try self.launch(application)
+                } catch {
+                    self.fail(error)
+                }
+            case .settings:
+                print("Shell settings requested (not implemented yet)")
+            }
+        }
 
         print("SwiftXR Shell ready")
-        print("Move the mouse to point, click to select, Escape to exit")
+        print("Video and Desktop now run in-process on the Shell OpenXR session")
+    }
+
+    private func launch(_ application: ShellApplication) throws {
+        switch application.kind {
+        case .videoPlayer:
+            try enterVideo()
+        case .virtualDesktop:
+            enterDesktop()
+        case let .external(external):
+            print("External OpenXR launch not implemented yet: \(external.executableURL.path)")
+        }
+    }
+
+    private func enterVideo() throws {
+        guard
+            mode == .home,
+            let session,
+            let swapchain
+        else { return }
+
+        leaveHomeInput()
+
+        let video = try ShellVideoMode(
+            session: session,
+            swapchain: swapchain,
+            onRequestHome: { [weak self] in
+                DispatchQueue.main.async { self?.returnHome() }
+            }
+        )
+        videoMode = video
+        mode = .video
+        try video.activate()
+    }
+
+    private func enterDesktop() {
+        guard
+            mode == .home,
+            let session,
+            let swapchain
+        else { return }
+
+        leaveHomeInput()
+        installDesktopEscapeMonitor()
+
+        let desktop = ShellDesktopMode(
+            session: session,
+            swapchain: swapchain,
+            onRequestHome: { [weak self] in
+                DispatchQueue.main.async { self?.returnHome() }
+            }
+        )
+        desktopMode = desktop
+        mode = .desktop
+        desktop.activate()
+        print("[shell] Desktop active — Escape returns to launcher")
+    }
+
+    private func returnHome() {
+        guard mode != .home else { return }
+
+        switch mode {
+        case .video:
+            videoMode?.shutdown()
+            videoMode = nil
+        case .desktop:
+            desktopMode?.deactivate()
+            desktopMode = nil
+            removeDesktopEscapeMonitor()
+        case .home:
+            break
+        }
+
+        mode = .home
+        homePanel?.interaction.movePointer(to: SIMD2<Float>(0.5, 0.5))
+        homePanel?.invalidate()
+        do {
+            try startHomePointerCaptureIfReady()
+        } catch {
+            fail(error)
+        }
+        print("[shell] returned Home")
+    }
+
+    private func leaveHomeInput() {
+        homePointerCapture?.stop()
+        clearHomeControllerHandlers()
     }
 
     @objc
     private func frameStep() {
-        guard
-            let session,
-            let swapchain,
-            let panel,
-            let renderer,
-            let pointerCapture
-        else { return }
+        guard let session, let swapchain else { return }
 
         do {
             try session.pollEvents()
 
             if session.shouldExit {
-                pointerCapture.stop()
+                homePointerCapture?.stop()
+                videoMode?.shutdown()
+                desktopMode?.deactivate()
                 NSApplication.shared.terminate(nil)
-                return
-            }
-
-            if pointerCapture.escapeRequested {
-                try requestSessionExitIfNeeded()
-                scheduleFrameStep(after: 0.005)
                 return
             }
 
@@ -153,26 +227,13 @@ private final class SwiftXRShellAppDelegate: NSObject, NSApplicationDelegate {
                 return
             }
 
-            try startPointerCaptureIfReady()
-            pointerCapture.poll()
-
-            let controller = GCController.current ?? GCController.controllers().first
-            if controller !== configuredController {
-                configuredController = controller
-                if let controller {
-                    configure(controller: controller, panel: panel)
-                }
-            }
-
-            try panel.refreshIfNeeded()
-            renderer.pointerPosition = panel.interaction.pointerPosition
-
-            try session.renderFrame(to: swapchain) { frame, texture, commandBuffer in
-                try renderer.encode(
-                    frame: frame,
-                    texture: texture,
-                    commandBuffer: commandBuffer
-                )
+            switch mode {
+            case .home:
+                try renderHome(session: session, swapchain: swapchain)
+            case .video:
+                try videoMode?.renderFrame()
+            case .desktop:
+                try desktopMode?.renderFrame()
             }
 
             scheduleFrameStep()
@@ -181,16 +242,107 @@ private final class SwiftXRShellAppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    private func startPointerCaptureIfReady() throws {
+    private func renderHome(session: XRSession, swapchain: XRSwapchain) throws {
         guard
-            NSApplication.shared.isActive,
-            session?.isRunning == true,
-            let pointerCapture,
-            !pointerCapture.isCaptureRequested
+            let panel = homePanel,
+            let renderer = homeRenderer,
+            let pointerCapture = homePointerCapture
         else { return }
 
-        try pointerCapture.start()
-        guard pointerCapture.isCaptured else {
+        try startHomePointerCaptureIfReady()
+
+        if pointerCapture.escapeRequested {
+            try requestSessionExitIfNeeded()
+            return
+        }
+
+        pointerCapture.poll()
+        configureHomeControllerIfNeeded(panel: panel)
+        try panel.refreshIfNeeded()
+        renderer.pointerPosition = panel.interaction.pointerPosition
+
+        _ = try session.renderFrame(to: swapchain) { frame, texture, commandBuffer in
+            try renderer.encode(
+                frame: frame,
+                texture: texture,
+                commandBuffer: commandBuffer
+            )
+        }
+    }
+
+    private func configureHomeControllerIfNeeded(panel: XRSwiftUIPanel<ShellHomeView>) {
+        let controller = GCController.current ?? GCController.controllers().first
+        guard controller !== configuredHomeController else { return }
+
+        clearHomeControllerHandlers()
+        configuredHomeController = controller
+        guard let pad = controller?.extendedGamepad else { return }
+
+        func onPress(
+            _ button: GCControllerButtonInput,
+            _ action: @escaping @MainActor () -> Void
+        ) {
+            button.pressedChangedHandler = { [weak self] _, _, pressed in
+                guard pressed else { return }
+                DispatchQueue.main.async {
+                    guard self?.mode == .home else { return }
+                    action()
+                }
+            }
+        }
+
+        onPress(pad.dpad.up) { panel.interaction.navigate(.up) }
+        onPress(pad.dpad.down) { panel.interaction.navigate(.down) }
+        onPress(pad.dpad.left) { panel.interaction.navigate(.left) }
+        onPress(pad.dpad.right) { panel.interaction.navigate(.right) }
+        onPress(pad.buttonA) { panel.interaction.select() }
+        onPress(pad.buttonB) { panel.interaction.back() }
+        onPress(pad.buttonMenu) { panel.interaction.select() }
+    }
+
+    private func clearHomeControllerHandlers() {
+        guard let pad = configuredHomeController?.extendedGamepad else {
+            configuredHomeController = nil
+            return
+        }
+        pad.dpad.up.pressedChangedHandler = nil
+        pad.dpad.down.pressedChangedHandler = nil
+        pad.dpad.left.pressedChangedHandler = nil
+        pad.dpad.right.pressedChangedHandler = nil
+        pad.buttonA.pressedChangedHandler = nil
+        pad.buttonB.pressedChangedHandler = nil
+        pad.buttonMenu.pressedChangedHandler = nil
+        configuredHomeController = nil
+    }
+
+    private func installDesktopEscapeMonitor() {
+        removeDesktopEscapeMonitor()
+        desktopEscapeMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) {
+            [weak self] event in
+            guard event.keyCode == 53 else { return event }
+            DispatchQueue.main.async { self?.returnHome() }
+            return nil
+        }
+    }
+
+    private func removeDesktopEscapeMonitor() {
+        if let desktopEscapeMonitor {
+            NSEvent.removeMonitor(desktopEscapeMonitor)
+            self.desktopEscapeMonitor = nil
+        }
+    }
+
+    private func startHomePointerCaptureIfReady() throws {
+        guard
+            mode == .home,
+            NSApplication.shared.isActive,
+            session?.isRunning == true,
+            let homePointerCapture,
+            !homePointerCapture.isCaptureRequested
+        else { return }
+
+        try homePointerCapture.start()
+        guard homePointerCapture.isCaptured else {
             throw XRMacPointerCaptureError.applicationNotActive
         }
     }
@@ -198,7 +350,9 @@ private final class SwiftXRShellAppDelegate: NSObject, NSApplicationDelegate {
     private func requestSessionExitIfNeeded() throws {
         guard !exitRequested else { return }
         exitRequested = true
-        pointerCapture?.stop()
+        homePointerCapture?.stop()
+        videoMode?.shutdown()
+        desktopMode?.deactivate()
 
         if session?.isRunning == true {
             try session?.requestExit()
@@ -217,7 +371,10 @@ private final class SwiftXRShellAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func fail(_ error: Error) {
-        pointerCapture?.stop()
+        homePointerCapture?.stop()
+        videoMode?.shutdown()
+        desktopMode?.deactivate()
+        removeDesktopEscapeMonitor()
         fputs("swiftxr-shell: \(error)\n", stderr)
 
         let alert = NSAlert()
