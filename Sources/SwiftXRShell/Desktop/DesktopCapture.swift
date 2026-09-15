@@ -52,6 +52,7 @@ final class DesktopCapture: NSObject, SCStreamOutput, SCStreamDelegate, @uncheck
         super.init()
     }
 
+    @MainActor
     static func primaryDisplay(device: any MTLDevice) async throws -> DesktopCapture {
         let content = try await SCShareableContent.excludingDesktopWindows(
             false,
