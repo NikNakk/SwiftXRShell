@@ -279,7 +279,11 @@ private struct VideoYouTubeBrowserView: View {
         ZStack {
             Color.black
             if let snapshot = model.youtubeSnapshot {
-                Image(nsImage: snapshot).resizable().aspectRatio(contentMode: .fill).clipped()
+                Image(nsImage: snapshot)
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .background(Color(red: 0.06, green: 0.06, blue: 0.06))
             } else {
                 VStack(spacing: 16) {
                     ProgressView().controlSize(.large)
@@ -287,30 +291,53 @@ private struct VideoYouTubeBrowserView: View {
                 }
                 .foregroundStyle(.white)
             }
+
             VStack {
                 HStack(spacing: 8) {
-                    Text("Files / Back")
+                    HStack(spacing: 6) {
+                        Image(systemName: "folder.fill")
+                        Text("Files")
+                    }
+                    .padding(.horizontal, 14)
+                    .frame(height: 44)
+                    .background(.black.opacity(0.78), in: Capsule())
+                    .overlay(Capsule().stroke(.white.opacity(0.22), lineWidth: 1))
+
+                    HStack(spacing: 6) {
+                        Image(systemName: "chevron.left")
+                        Text("Back")
+                    }
+                    .padding(.horizontal, 14)
+                    .frame(height: 44)
+                    .background(.black.opacity(0.78), in: Capsule())
+                    .overlay(Capsule().stroke(.white.opacity(0.22), lineWidth: 1))
+
                     Spacer()
-                    Text("SwiftXR Shell Video")
                 }
                 .font(.system(size: 15, weight: .semibold))
-                .padding(.horizontal, 18)
-                .frame(height: 44)
-                .background(.black.opacity(0.72))
+                .padding(.leading, 14)
+                .padding(.top, 10)
+
                 Spacer()
-                Text("Mouse/left stick: cursor   Click/Cross: select   Right stick/scroll: page   Circle: back")
-                    .font(.system(size: 14, weight: .medium))
-                    .padding(.horizontal, 18)
-                    .frame(height: 42)
-                    .frame(maxWidth: .infinity)
-                    .background(.black.opacity(0.76))
+
+                HStack {
+                    Spacer()
+                    Text("Scroll / right stick • Click / Cross • Circle back")
+                        .font(.system(size: 13, weight: .medium))
+                        .padding(.horizontal, 14)
+                        .frame(height: 36)
+                        .background(.black.opacity(0.68), in: Capsule())
+                        .overlay(Capsule().stroke(.white.opacity(0.16), lineWidth: 1))
+                }
+                .padding(.trailing, 14)
+                .padding(.bottom, 10)
             }
             .foregroundStyle(.white)
         }
-        .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
         .overlay(
-            RoundedRectangle(cornerRadius: 22, style: .continuous)
-                .stroke(.white.opacity(0.15), lineWidth: 1.5)
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .stroke(.white.opacity(0.12), lineWidth: 1)
         )
     }
 }
