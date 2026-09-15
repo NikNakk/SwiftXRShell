@@ -12,7 +12,7 @@ struct DesktopSurfaceHit {
 
 struct DesktopSurfaceGeometry {
     var center = SIMD3<Float>(0, 0, -2.0)
-    var widthMeters: Float = 2.2
+    var widthMeters: Float
     var pixelSize: SIMD2<Int>
 
     var aspectRatio: Float {
@@ -103,6 +103,8 @@ private struct DesktopUniforms {
 }
 
 final class DesktopRenderer {
+    static let defaultWidthMeters: Float = 3.2
+
     let geometry: DesktopSurfaceGeometry
 
     private let pipelineState: any MTLRenderPipelineState
@@ -112,11 +114,13 @@ final class DesktopRenderer {
     init(
         device: any MTLDevice,
         swapchain: XRSwapchain,
-        capturedPixelSize: CGSize
+        capturedPixelSize: CGSize,
+        widthMeters: Float = DesktopRenderer.defaultWidthMeters
     ) throws {
         let pixelWidth = max(Int(capturedPixelSize.width.rounded()), 1)
         let pixelHeight = max(Int(capturedPixelSize.height.rounded()), 1)
         self.geometry = DesktopSurfaceGeometry(
+            widthMeters: widthMeters,
             pixelSize: SIMD2(pixelWidth, pixelHeight)
         )
 
