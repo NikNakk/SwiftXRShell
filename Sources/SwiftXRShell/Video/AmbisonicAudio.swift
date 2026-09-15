@@ -58,12 +58,13 @@ final class AmbisonicAudio {
         guard let channelLayout = AVAudioChannelLayout(layoutTag: hoaTag) else {
             throw AmbisonicAudioError.channelLayoutCreationFailed
         }
-        guard let format = AVAudioFormat(
+        let format = AVAudioFormat(
             commonFormat: .pcmFormatFloat32,
             sampleRate: 48_000,
             interleaved: false,
             channelLayout: channelLayout
-        ), format.channelCount == 4 else {
+        )
+        guard format.channelCount == 4 else {
             throw AmbisonicAudioError.formatCreationFailed
         }
 
