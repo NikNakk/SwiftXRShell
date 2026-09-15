@@ -16,7 +16,10 @@ final class YouTubeBrowserController: NSObject {
     private static let motionSnapshotInterval: TimeInterval = 1.0 / 45.0
     private static let typingSnapshotInterval: TimeInterval = 1.0 / 30.0
     private static let idleSnapshotInterval: TimeInterval = 1.0 / 12.0
+    private static let scrollStepInterval: TimeInterval = 1.0 / 35.0
     private static let scrollScale: Double = 900
+    private static let maximumScrollStep: Double = 220
+    private static let momentumDecay: Double = 0.82
 
     private let webView: WKWebView
     private let window: HiddenYouTubeBrowserWindow
@@ -26,8 +29,16 @@ final class YouTubeBrowserController: NSObject {
     private var lastSnapshot = Date.distantPast
     private var textInputFocused = false
     private var isShutdown = false
-    private var pendingScrollImpulse: Double = 0
+
+    // Keep scroll animation on the native Swift side. The WebKit window is
+    // intentionally almost transparent/off-screen, so requestAnimationFrame
+    // inside the page may be throttled or suspended by WebKit. GAV's proven
+    // path used direct window.scrollBy() calls from native code; this preserves
+    // that behaviour while adding a small native momentum tail.
+    private var pendingScrollDistance: Double = 0
+    private var scrollMomentum: Double = 0
     private var scrollEvaluationPending = false
+    private var lastScrollStep = Date.distantPast
     private var scrollActiveUntil = Date.distantPast
 
     var onSnapshot: ((NSImage?) -> Void)?
@@ -112,16 +123,18 @@ final class YouTubeBrowserController: NSObject {
 
     func close() {
         textInputFocused = false
-        pendingScrollImpulse = 0
+        pendingScrollDistance = 0
+        scrollMomentum = 0
         scrollActiveUntil = .distantPast
         window.orderOut(nil)
     }
 
     func tick() {
         guard !isShutdown else { return }
-        flushPendingScrollIfNeeded()
 
         let now = Date()
+        stepScrollIfNeeded(now: now)
+
         let scrolling = now < scrollActiveUntil
         if scrolling {
             needsSnapshot = true
@@ -222,10 +235,12 @@ final class YouTubeBrowserController: NSObject {
         let amount = -Double(delta.y) * Self.scrollScale
         guard abs(amount) > 0.15 else { return }
 
-        pendingScrollImpulse = min(max(pendingScrollImpulse + amount, -1800), 1800)
-        scrollActiveUntil = Date().addingTimeInterval(0.9)
+        pendingScrollDistance = min(max(pendingScrollDistance + amount, -2400), 2400)
+        // New input should dominate stale momentum immediately.
+        scrollMomentum *= 0.35
+        scrollActiveUntil = Date().addingTimeInterval(0.35)
         needsSnapshot = true
-        flushPendingScrollIfNeeded()
+        stepScrollIfNeeded(now: Date(), force: true)
     }
 
     func back() -> Bool {
@@ -239,19 +254,35 @@ final class YouTubeBrowserController: NSObject {
         return false
     }
 
-    private func flushPendingScrollIfNeeded() {
-        guard !scrollEvaluationPending, abs(pendingScrollImpulse) > 0.5 else { return }
-        let impulse = min(max(pendingScrollImpulse, -900), 900)
-        pendingScrollImpulse -= impulse
+    private func stepScrollIfNeeded(now: Date, force: Bool = false) {
+        guard !scrollEvaluationPending else { return }
+        guard force || now.timeIntervalSince(lastScrollStep) >= Self.scrollStepInterval else { return }
+
+        let step: Double
+        if abs(pendingScrollDistance) > 0.5 {
+            step = min(max(pendingScrollDistance, -Self.maximumScrollStep), Self.maximumScrollStep)
+            pendingScrollDistance -= step
+            scrollMomentum = step * 0.70
+        } else if abs(scrollMomentum) > 0.75 {
+            step = scrollMomentum
+            scrollMomentum *= Self.momentumDecay
+        } else {
+            scrollMomentum = 0
+            return
+        }
+
+        lastScrollStep = now
+        scrollActiveUntil = now.addingTimeInterval(0.25)
         scrollEvaluationPending = true
 
-        let script = "window.__swiftXRScrollImpulse && window.__swiftXRScrollImpulse(\(String(format: "%.1f", impulse)));"
+        // This deliberately mirrors the GAV Monado POC's proven direct WebKit
+        // scroll path. It does not depend on page requestAnimationFrame.
+        let script = "window.scrollBy(0, \(String(format: "%.1f", step)));"
         webView.evaluateJavaScript(script) { [weak self] _, _ in
             Task { @MainActor in
                 guard let self else { return }
                 self.scrollEvaluationPending = false
                 self.needsSnapshot = true
-                self.flushPendingScrollIfNeeded()
             }
         }
     }
@@ -266,7 +297,6 @@ final class YouTubeBrowserController: NSObject {
     (() => {
       const BUTTON_ID = 'swiftxr-psvr2-play-button';
       const STYLE_ID = 'swiftxr-youtube-style';
-      const SCROLL_STATE = '__swiftXRScrollState';
 
       const installStyle = () => {
         if (document.getElementById(STYLE_ID)) return;
@@ -284,27 +314,6 @@ final class YouTubeBrowserController: NSObject {
           ytd-popup-container tp-yt-paper-dialog { max-width: 90vw !important; }
         `;
         document.documentElement.appendChild(style);
-      };
-
-      const installSmoothScroll = () => {
-        if (window[SCROLL_STATE]) return;
-        const state = { velocity: 0, running: true };
-        window[SCROLL_STATE] = state;
-        window.__swiftXRScrollImpulse = amount => {
-          const impulse = Math.max(-900, Math.min(900, Number(amount) || 0));
-          state.velocity = Math.max(-72, Math.min(72, state.velocity + impulse * 0.085));
-        };
-        const frame = () => {
-          if (!state.running) return;
-          if (Math.abs(state.velocity) > 0.04) {
-            const root = document.scrollingElement || document.documentElement;
-            if (root) root.scrollTop += state.velocity;
-            state.velocity *= 0.885;
-            if (Math.abs(state.velocity) < 0.04) state.velocity = 0;
-          }
-          requestAnimationFrame(frame);
-        };
-        requestAnimationFrame(frame);
       };
 
       const isPlayableURL = value => {
@@ -332,7 +341,6 @@ final class YouTubeBrowserController: NSObject {
 
       const install = () => {
         installStyle();
-        installSmoothScroll();
         document.querySelectorAll('video').forEach(v => { v.muted = true; v.pause(); });
         const onVideo = location.pathname === '/watch' || location.pathname.startsWith('/shorts/');
         let button = document.getElementById(BUTTON_ID);
