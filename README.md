@@ -12,14 +12,14 @@ The intended scope is:
 
 ## Current state
 
-The repository currently contains the first runnable Home shell:
+The repository currently contains a runnable Home shell with built-in Video and Desktop modes sharing one OpenXR session:
 
 - SwiftUI Home rendered into OpenXR through SwiftXR;
 - mouse pointer capture and native SwiftUI interaction;
 - controller navigation plumbing;
-- built-in Video and Desktop entries represented through the same application model future external OpenXR apps will use.
-
-The Video and Desktop entries are placeholders while their working implementations are migrated from the SwiftXR examples into this repository.
+- integrated immersive video player with local files and YouTube support;
+- integrated ScreenCaptureKit virtual desktop;
+- Home ↔ Video and Home ↔ Desktop transitions without creating a second OpenXR client.
 
 ## Build
 
@@ -38,7 +38,21 @@ XR_RUNTIME_JSON=~/Code/monado/build-macos-psvr2-display/openxr_monado-dev.json \
 swift run swiftxr-shell
 ```
 
-Move the mouse to point, click to activate a tile, and press Escape to exit.
+Move the mouse to point and click to activate a tile. Escape returns from a built-in mode to Home; Escape from Home exits the Shell.
+
+## Virtual desktop size
+
+The virtual desktop preserves the captured display's aspect ratio. Its default physical width is **3.2 metres** at the current 2.0 metre viewing distance.
+
+Override the width with `SWIFTXR_DESKTOP_WIDTH_METERS`. Values are clamped to 0.75–8.0 metres. For example:
+
+```bash
+SWIFTXR_DESKTOP_WIDTH_METERS=4.0 \
+XR_RUNTIME_JSON=~/Code/monado/build-macos-psvr2-display/openxr_monado-dev.json \
+swift run swiftxr-shell
+```
+
+The selected physical width and resulting height are printed when Desktop starts.
 
 ## Direction
 
