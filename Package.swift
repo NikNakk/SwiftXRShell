@@ -28,7 +28,17 @@ let package = Package(
                     "-Xlinker", "-rpath",
                     "-Xlinker", "/usr/local/lib",
                 ], .when(platforms: [.macOS])),
-                .linkedFramework("GameController")
+                .linkedFramework("ApplicationServices"),
+                .linkedFramework("AVFoundation"),
+                .linkedFramework("AVFAudio"),
+                .linkedFramework("AudioToolbox"),
+                .linkedFramework("CoreAudio"),
+                .linkedFramework("CoreMedia"),
+                .linkedFramework("CoreVideo"),
+                .linkedFramework("GameController"),
+                .linkedFramework("QuartzCore"),
+                .linkedFramework("ScreenCaptureKit"),
+                .linkedFramework("WebKit")
             ]
         )
     ]
