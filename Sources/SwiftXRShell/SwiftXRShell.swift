@@ -6,7 +6,7 @@ import SwiftXR
 
 @MainActor
 private final class SwiftXRShellAppDelegate: NSObject, NSApplicationDelegate {
-    private enum Mode {
+    private enum Mode: Equatable {
         case home
         case video
         case desktop
