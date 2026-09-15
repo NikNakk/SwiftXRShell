@@ -2,7 +2,7 @@ import CoreMedia
 import CoreVideo
 import Foundation
 import Metal
-import ScreenCaptureKit
+@preconcurrency import ScreenCaptureKit
 
 struct DesktopCaptureFrame {
     let texture: any MTLTexture
