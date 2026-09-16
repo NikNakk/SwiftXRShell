@@ -1,0 +1,21 @@
+[
+  {
+    "id": "open-brush",
+    "title": "Open Brush",
+    "subtitle": "3D painting",
+    "systemImage": "paintbrush.fill",
+    "path": "/Applications/Open Brush.app",
+    "arguments": [],
+    "environment": {},
+    "openXRApplicationName": "Open Brush"
+  },
+  {
+    "id": "godot-xr-demo",
+    "title": "Godot XR Demo",
+    "subtitle": "External OpenXR application",
+    "systemImage": "cube.fill",
+    "path": "~/Code/godot-xr-demo/Godot XR Demo.app",
+    "arguments": [],
+    "environment": {}
+  }
+]
