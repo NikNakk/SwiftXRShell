@@ -18,6 +18,7 @@ final class YouTubeBrowserController: NSObject {
     private static let typingSnapshotInterval: TimeInterval = 1.0 / 30.0
     private static let idleSnapshotInterval: TimeInterval = 1.0 / 12.0
     private static let scrollStepInterval: TimeInterval = 1.0 / 35.0
+    private static let layoutProbeInterval: TimeInterval = 0.30
     private static let scrollScale: Double = 900
     private static let maximumScrollStep: Double = 220
     private static let momentumDecay: Double = 0.82
@@ -40,6 +41,12 @@ final class YouTubeBrowserController: NSObject {
     private var scrollEvaluationPending = false
     private var lastScrollStep = Date.distantPast
     private var scrollActiveUntil = Date.distantPast
+
+    // Temporary diagnostics for the large blank region seen after YouTube's
+    // initial search-result batch. Keep this independent of scrolling behaviour:
+    // we only inspect layout and print what owns the viewport.
+    private var layoutProbePending = false
+    private var lastLayoutProbe = Date.distantPast
 
     private weak var transformedApplication: XRMacApplication?
     private var previousEventTransformer: XRMacApplication.EventTransformer?
@@ -144,6 +151,7 @@ final class YouTubeBrowserController: NSObject {
         let scrolling = now < scrollActiveUntil
         if scrolling {
             needsSnapshot = true
+            probeYouTubeLayoutIfNeeded(now: now)
         }
 
         let interval: TimeInterval
@@ -303,6 +311,121 @@ final class YouTubeBrowserController: NSObject {
         needsSnapshot = true
     }
 
+    private func probeYouTubeLayoutIfNeeded(now: Date) {
+        guard !layoutProbePending else { return }
+        guard now.timeIntervalSince(lastLayoutProbe) >= Self.layoutProbeInterval else { return }
+
+        layoutProbePending = true
+        lastLayoutProbe = now
+
+        let script = """
+        (() => {
+          const root = document.scrollingElement || document.documentElement;
+          if (!root) return { error: 'no-root' };
+
+          const viewportHeight = Math.max(window.innerHeight || 0, root.clientHeight || 0);
+          const viewportWidth = Math.max(window.innerWidth || 0, root.clientWidth || 0);
+
+          const describe = el => {
+            if (!(el instanceof Element)) return null;
+            const rect = el.getBoundingClientRect();
+            const style = getComputedStyle(el);
+            return {
+              tag: (el.tagName || '').toLowerCase(),
+              id: el.id || '',
+              class: String(el.className || '').slice(0, 160),
+              top: Math.round(rect.top),
+              bottom: Math.round(rect.bottom),
+              height: Math.round(rect.height),
+              display: style.display,
+              visibility: style.visibility,
+              position: style.position,
+              contentVisibility: style.contentVisibility || '',
+              contain: style.contain || ''
+            };
+          };
+
+          const centerRaw = document.elementsFromPoint(
+            Math.max(1, viewportWidth * 0.5),
+            Math.max(1, viewportHeight * 0.5)
+          ).slice(0, 10);
+          const center = centerRaw.map(describe).filter(Boolean);
+
+          const ancestors = new Set();
+          for (const start of centerRaw) {
+            let el = start;
+            for (let depth = 0; el && depth < 14; depth++, el = el.parentElement) {
+              ancestors.add(el);
+            }
+          }
+          const tallAncestors = Array.from(ancestors)
+            .map(describe)
+            .filter(item => item && item.height > viewportHeight * 1.25)
+            .sort((a, b) => a.height - b.height)
+            .slice(0, 12);
+
+          const selectors = [
+            'ytd-search ytd-section-list-renderer > #contents > *',
+            'ytd-search ytd-item-section-renderer > #contents > *',
+            'ytd-search ytd-ad-slot-renderer',
+            'ytd-search ytd-search-pyv-renderer',
+            'ytd-search ytd-in-feed-ad-layout-renderer',
+            'ytd-search ytd-continuation-item-renderer'
+          ];
+          const nearby = Array.from(document.querySelectorAll(selectors.join(',')))
+            .map(describe)
+            .filter(item => item && item.bottom >= -viewportHeight && item.top <= viewportHeight * 2)
+            .sort((a, b) => a.top - b.top)
+            .slice(0, 32);
+
+          const continuations = Array.from(
+            document.querySelectorAll('ytd-search ytd-continuation-item-renderer')
+          ).map(describe).filter(Boolean);
+
+          const ads = Array.from(document.querySelectorAll(
+            'ytd-search ytd-ad-slot-renderer, ' +
+            'ytd-search ytd-search-pyv-renderer, ' +
+            'ytd-search ytd-in-feed-ad-layout-renderer'
+          )).map(describe).filter(Boolean);
+
+          return {
+            scrollY: Math.round(root.scrollTop || window.scrollY || 0),
+            scrollHeight: Math.round(root.scrollHeight || 0),
+            viewportHeight: Math.round(viewportHeight),
+            videoCount: document.querySelectorAll('ytd-search ytd-video-renderer').length,
+            lockupCount: document.querySelectorAll('ytd-search yt-lockup-view-model').length,
+            continuationCount: continuations.length,
+            adCount: ads.length,
+            center,
+            tallAncestors,
+            nearby,
+            continuations,
+            ads
+          };
+        })()
+        """
+
+        webView.evaluateJavaScript(script) { [weak self] result, error in
+            Task { @MainActor in
+                guard let self else { return }
+                self.layoutProbePending = false
+
+                if let error {
+                    print("[YouTubeLayout] probe-error=\(error.localizedDescription)")
+                    return
+                }
+                guard let result else { return }
+                if JSONSerialization.isValidJSONObject(result),
+                   let data = try? JSONSerialization.data(withJSONObject: result, options: [.sortedKeys]),
+                   let json = String(data: data, encoding: .utf8) {
+                    print("[YouTubeLayout] \(json)")
+                } else {
+                    print("[YouTubeLayout] \(result)")
+                }
+            }
+        }
+    }
+
     private func stepScrollIfNeeded(now: Date, force: Bool = false) {
         guard !scrollEvaluationPending else { return }
         guard force || now.timeIntervalSince(lastScrollStep) >= Self.scrollStepInterval else { return }
@@ -385,26 +508,6 @@ final class YouTubeBrowserController: NSObject {
           }
           #guide { display: none !important; }
           ytd-popup-container tp-yt-paper-dialog { max-width: 90vw !important; }
-
-          /* WebKit 26.x now fully implements content-visibility:auto. YouTube's
-             search result virtualization can therefore reserve a large intrinsic
-             placeholder for an off-screen result subtree. In an off-screen
-             WKWebView snapshot that can become a huge blank region which only
-             resolves once the user scrolls far enough to activate the subtree.
-             Force the search-result hierarchy to participate in normal layout;
-             keep the rest of YouTube's virtualization untouched. */
-          ytd-search ytd-section-list-renderer,
-          ytd-search #contents.ytd-section-list-renderer,
-          ytd-search ytd-item-section-renderer,
-          ytd-search #contents.ytd-item-section-renderer,
-          ytd-search ytd-video-renderer,
-          ytd-search yt-lockup-view-model,
-          ytd-search grid-shelf-view-model,
-          ytd-search ytd-continuation-item-renderer {
-            content-visibility: visible !important;
-            contain-intrinsic-size: none !important;
-            contain: none !important;
-          }
         `;
         document.documentElement.appendChild(style);
       };
