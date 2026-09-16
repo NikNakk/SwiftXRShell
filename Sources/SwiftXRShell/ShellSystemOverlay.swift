@@ -175,6 +175,7 @@ final class ShellSystemOverlayController {
     }
 
     func foregroundApplicationDidBecomeActive() {
+        guard session != nil else { return }
         foregroundApplicationActive = true
         ensureControllerConfigured()
     }
@@ -226,7 +227,7 @@ final class ShellSystemOverlayController {
     }
 
     private func show() {
-        guard foregroundApplicationActive, !model.isQuitting else { return }
+        guard session != nil, foregroundApplicationActive, !model.isQuitting else { return }
         isVisible = true
         model.selectedIndex = 0
         panel?.invalidate()
@@ -251,7 +252,7 @@ final class ShellSystemOverlayController {
     }
 
     private func ensureControllerConfigured() {
-        guard foregroundApplicationActive else { return }
+        guard session != nil, foregroundApplicationActive else { return }
         let controller = GCController.current ?? GCController.controllers().first
         guard controller !== configuredController else { return }
 
@@ -261,7 +262,7 @@ final class ShellSystemOverlayController {
     }
 
     private func installTriggerHandler() {
-        guard let pad = configuredController?.extendedGamepad else { return }
+        guard session != nil, let pad = configuredController?.extendedGamepad else { return }
 
         pad.dpad.up.pressedChangedHandler = nil
         pad.dpad.down.pressedChangedHandler = nil
