@@ -41,6 +41,7 @@ struct ExternalOpenXRApplication: Hashable, Sendable {
     let executableURL: URL
     var arguments: [String] = []
     var environment: [String: String] = [:]
+    var openXRApplicationName: String?
 }
 
 @MainActor
