@@ -398,8 +398,45 @@ final class YouTubeBrowserController: NSObject {
             min-height: 0 !important;
             max-height: none !important;
           }
+
+          /* Avoid a flash of the dedicated Shorts components before the dynamic
+             href-based filter below gets a chance to run. */
+          ytd-search ytd-reel-shelf-renderer,
+          ytd-search ytm-shorts-lockup-view-model,
+          ytd-search ytm-shorts-lockup-view-model-v2 {
+            display: none !important;
+          }
         `;
         document.documentElement.appendChild(style);
+      };
+
+      const isShortsURL = value => {
+        try {
+          const u = new URL(value, location.href);
+          const host = u.hostname.toLowerCase();
+          const isYouTube = host === 'youtube.com' || host === 'www.youtube.com' || host.endsWith('.youtube.com');
+          return isYouTube && u.pathname.startsWith('/shorts/');
+        } catch (_) {
+          return false;
+        }
+      };
+
+      const filterShorts = () => {
+        if (location.pathname !== '/results') return;
+
+        document.querySelectorAll(
+          'ytd-reel-shelf-renderer, ytm-shorts-lockup-view-model, ytm-shorts-lockup-view-model-v2'
+        ).forEach(node => node.style.setProperty('display', 'none', 'important'));
+
+        document.querySelectorAll('a[href]').forEach(anchor => {
+          if (!isShortsURL(anchor.href)) return;
+          const card = anchor.closest(
+            'ytd-video-renderer, ytd-grid-video-renderer, yt-lockup-view-model, ' +
+            'ytd-rich-item-renderer, ytd-reel-item-renderer, grid-shelf-view-model, ' +
+            'ytd-reel-shelf-renderer'
+          );
+          if (card) card.style.setProperty('display', 'none', 'important');
+        });
       };
 
       const isPlayableURL = value => {
@@ -427,6 +464,7 @@ final class YouTubeBrowserController: NSObject {
 
       const install = () => {
         installStyle();
+        filterShorts();
         document.querySelectorAll('video').forEach(v => { v.muted = true; v.pause(); });
         const onVideo = location.pathname === '/watch' || location.pathname.startsWith('/shorts/');
         let button = document.getElementById(BUTTON_ID);
