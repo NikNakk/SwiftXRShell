@@ -179,6 +179,12 @@ final class ShellSystemOverlayController {
         ensureControllerConfigured()
     }
 
+    func quitRequestFailed() {
+        model.isQuitting = false
+        model.selectedIndex = 1
+        panel?.invalidate()
+    }
+
     func renderFrame() throws {
         guard let session else { return }
 
