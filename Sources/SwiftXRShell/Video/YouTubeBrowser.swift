@@ -386,17 +386,24 @@ final class YouTubeBrowserController: NSObject {
           #guide { display: none !important; }
           ytd-popup-container tp-yt-paper-dialog { max-width: 90vw !important; }
 
-          /* YouTube search commonly inserts a Shorts shelf after the first few
-             ordinary results. In this off-screen WKWebView the shelf can retain
-             its large layout box even when its contents do not paint into the
-             snapshot, producing what looks like a huge blank section. We do not
-             use Shorts in the immersive-video browser, so remove only those
-             search-page shelf variants and leave normal video results intact. */
-          ytd-search ytd-reel-shelf-renderer,
-          ytd-search grid-shelf-view-model:has(.shortsLockupViewModelHost),
-          ytd-search grid-shelf-view-model:has(ytm-shorts-lockup-view-model),
-          ytd-search grid-shelf-view-model:has(ytm-shorts-lockup-view-model-v2) {
-            display: none !important;
+          /* WebKit 26.x now fully implements content-visibility:auto. YouTube's
+             search result virtualization can therefore reserve a large intrinsic
+             placeholder for an off-screen result subtree. In an off-screen
+             WKWebView snapshot that can become a huge blank region which only
+             resolves once the user scrolls far enough to activate the subtree.
+             Force the search-result hierarchy to participate in normal layout;
+             keep the rest of YouTube's virtualization untouched. */
+          ytd-search ytd-section-list-renderer,
+          ytd-search #contents.ytd-section-list-renderer,
+          ytd-search ytd-item-section-renderer,
+          ytd-search #contents.ytd-item-section-renderer,
+          ytd-search ytd-video-renderer,
+          ytd-search yt-lockup-view-model,
+          ytd-search grid-shelf-view-model,
+          ytd-search ytd-continuation-item-renderer {
+            content-visibility: visible !important;
+            contain-intrinsic-size: none !important;
+            contain: none !important;
           }
         `;
         document.documentElement.appendChild(style);
