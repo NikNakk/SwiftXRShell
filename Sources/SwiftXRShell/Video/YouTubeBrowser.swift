@@ -1,6 +1,7 @@
 @preconcurrency import WebKit
 import AppKit
 import Foundation
+import SwiftXR
 
 @MainActor
 private final class HiddenYouTubeBrowserWindow: NSWindow {
@@ -30,16 +31,18 @@ final class YouTubeBrowserController: NSObject {
     private var textInputFocused = false
     private var isShutdown = false
 
-    // Keep scroll animation on the native Swift side. The WebKit window is
-    // intentionally almost transparent/off-screen, so requestAnimationFrame
-    // inside the page may be throttled or suspended by WebKit. GAV's proven
-    // path used direct window.scrollBy() calls from native code; this preserves
-    // that behaviour while adding a small native momentum tail.
+    // Controller scrolling keeps the proven GAV-style direct window.scrollBy
+    // fallback. Trackpad scrolling bypasses this path entirely and is delivered
+    // to WebKit as the original NSEvent so precise deltas, gesture phases and
+    // native momentum are preserved.
     private var pendingScrollDistance: Double = 0
     private var scrollMomentum: Double = 0
     private var scrollEvaluationPending = false
     private var lastScrollStep = Date.distantPast
     private var scrollActiveUntil = Date.distantPast
+
+    private weak var transformedApplication: XRMacApplication?
+    private var previousEventTransformer: XRMacApplication.EventTransformer?
 
     var onSnapshot: ((NSImage?) -> Void)?
     var onLaunchURL: ((String) -> Void)?
@@ -102,6 +105,7 @@ final class YouTubeBrowserController: NSObject {
     func shutdown() {
         guard !isShutdown else { return }
         isShutdown = true
+        uninstallNativeScrollBridge()
         webView.configuration.userContentController.removeScriptMessageHandler(forName: "swiftXRVR")
         webView.navigationDelegate = nil
         window.orderOut(nil)
@@ -110,6 +114,7 @@ final class YouTubeBrowserController: NSObject {
     func open() {
         guard !isShutdown else { return }
         window.orderFrontRegardless()
+        installNativeScrollBridge()
         needsSnapshot = true
         onStatus?("Loading YouTube VR…")
 
@@ -126,6 +131,7 @@ final class YouTubeBrowserController: NSObject {
         pendingScrollDistance = 0
         scrollMomentum = 0
         scrollActiveUntil = .distantPast
+        uninstallNativeScrollBridge()
         window.orderOut(nil)
     }
 
@@ -230,13 +236,15 @@ final class YouTubeBrowserController: NSObject {
         }
     }
 
+    /// Controller/right-stick fallback. Physical trackpad events are intercepted
+    /// before SwiftXR reduces them to semantic deltas and are sent through
+    /// `handleNativeScroll(_:)` instead.
     func scroll(_ delta: SIMD2<Float>) {
         guard !isShutdown else { return }
         let amount = -Double(delta.y) * Self.scrollScale
         guard abs(amount) > 0.15 else { return }
 
         pendingScrollDistance = min(max(pendingScrollDistance + amount, -2400), 2400)
-        // New input should dominate stale momentum immediately.
         scrollMomentum *= 0.35
         scrollActiveUntil = Date().addingTimeInterval(0.35)
         needsSnapshot = true
@@ -252,6 +260,47 @@ final class YouTubeBrowserController: NSObject {
             return true
         }
         return false
+    }
+
+    private func installNativeScrollBridge() {
+        guard transformedApplication == nil else { return }
+        guard let application = NSApplication.shared as? XRMacApplication else { return }
+
+        let previous = application.swiftXREventTransformer
+        transformedApplication = application
+        previousEventTransformer = previous
+
+        application.swiftXREventTransformer = { [weak self] event in
+            let consumed = MainActor.assumeIsolated { () -> Bool in
+                guard let self, !self.isShutdown, event.type == .scrollWheel else {
+                    return false
+                }
+                self.handleNativeScroll(event)
+                return true
+            }
+
+            if consumed { return nil }
+            return previous?(event) ?? event
+        }
+    }
+
+    private func uninstallNativeScrollBridge() {
+        guard let application = transformedApplication else { return }
+        application.swiftXREventTransformer = previousEventTransformer
+        transformedApplication = nil
+        previousEventTransformer = nil
+    }
+
+    private func handleNativeScroll(_ event: NSEvent) {
+        // Let WebKit consume the real trackpad event. This preserves precise
+        // pixel deltas plus phase/momentumPhase, matching ordinary Safari/WKWebView
+        // behaviour and allowing YouTube's own scroll/lazy-loading machinery to
+        // observe a genuine browser scroll rather than a JS-mutated scrollTop.
+        pendingScrollDistance = 0
+        scrollMomentum = 0
+        webView.scrollWheel(with: event)
+        scrollActiveUntil = Date().addingTimeInterval(0.60)
+        needsSnapshot = true
     }
 
     private func stepScrollIfNeeded(now: Date, force: Bool = false) {
@@ -275,8 +324,6 @@ final class YouTubeBrowserController: NSObject {
         scrollActiveUntil = now.addingTimeInterval(0.25)
         scrollEvaluationPending = true
 
-        // This deliberately mirrors the GAV Monado POC's proven direct WebKit
-        // scroll path. It does not depend on page requestAnimationFrame.
         let script = "window.scrollBy(0, \(String(format: "%.1f", step)));"
         webView.evaluateJavaScript(script) { [weak self] _, _ in
             Task { @MainActor in
