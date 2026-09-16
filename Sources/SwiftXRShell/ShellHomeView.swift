@@ -37,6 +37,14 @@ struct ShellHomeView: View {
                     Spacer()
 
                     Button {
+                        model.recenter()
+                    } label: {
+                        Label("Recenter", systemImage: "scope")
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.large)
+
+                    Button {
                         model.openSettings()
                     } label: {
                         Label("Settings", systemImage: "gearshape.fill")
