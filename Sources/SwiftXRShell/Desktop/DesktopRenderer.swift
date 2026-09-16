@@ -181,6 +181,7 @@ final class DesktopRenderer {
     ) throws {
         guard frame.views.count >= 2 else { return }
 
+        ShellStageAnchor.shared.updateIfNeeded(from: frame)
         let model = ShellStageAnchor.shared.modelMatrix(
             worldWidth: geometry.widthMeters,
             textureAspect: geometry.aspectRatio,
