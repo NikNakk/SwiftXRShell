@@ -69,18 +69,18 @@ struct VideoControlsView: View {
 
     var body: some View {
         ZStack {
-            RoundedRectangle(cornerRadius: 26, style: .continuous)
-                .fill(.black.opacity(0.88))
-            RoundedRectangle(cornerRadius: 26, style: .continuous)
-                .stroke(.white.opacity(0.20), lineWidth: 1.5)
+            RoundedRectangle(cornerRadius: 30, style: .continuous)
+                .fill(.black.opacity(0.90))
+            RoundedRectangle(cornerRadius: 30, style: .continuous)
+                .stroke(.white.opacity(0.22), lineWidth: 1.7)
 
-            VStack(spacing: 13) {
-                HStack(spacing: 10) {
-                    VStack(alignment: .leading, spacing: 2) {
+            VStack(spacing: 20) {
+                HStack(spacing: 14) {
+                    VStack(alignment: .leading, spacing: 5) {
                         Text(model.title)
-                            .font(.system(size: 18, weight: .semibold))
+                            .font(.system(size: 26, weight: .semibold))
                             .lineLimit(1)
-                        HStack(spacing: 8) {
+                        HStack(spacing: 10) {
                             Text(model.projectionMode.description)
                             Text("•")
                             Text(model.stereoLayout.description)
@@ -88,8 +88,8 @@ struct VideoControlsView: View {
                                 Label("Spatial", systemImage: "spatialaudio")
                             }
                         }
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(.white.opacity(0.65))
+                        .font(.system(size: 15, weight: .medium))
+                        .foregroundStyle(.white.opacity(0.70))
                     }
                     Spacer()
                     Button { model.send(.home) } label: {
@@ -108,8 +108,11 @@ struct VideoControlsView: View {
                     .buttonStyle(.bordered)
                 }
 
-                HStack(spacing: 10) {
-                    Text(Self.timeString(model.currentTime)).monospacedDigit().frame(width: 52, alignment: .trailing)
+                HStack(spacing: 14) {
+                    Text(Self.timeString(model.currentTime))
+                        .font(.system(size: 17, weight: .medium, design: .monospaced))
+                        .monospacedDigit()
+                        .frame(width: 76, alignment: .trailing)
                     Slider(
                         value: Binding(get: { model.currentTime }, set: { model.currentTime = $0 }),
                         in: 0...max(model.duration, 0.001),
@@ -118,18 +121,24 @@ struct VideoControlsView: View {
                             if !editing { model.send(.seekTo(model.currentTime)) }
                         }
                     )
-                    Text(Self.timeString(model.duration)).monospacedDigit().frame(width: 52, alignment: .leading)
+                    Text(Self.timeString(model.duration))
+                        .font(.system(size: 17, weight: .medium, design: .monospaced))
+                        .monospacedDigit()
+                        .frame(width: 76, alignment: .leading)
                 }
 
-                HStack(spacing: 14) {
+                HStack(spacing: 18) {
                     Button { model.send(.seekBy(-15)) } label: { Label("15", systemImage: "gobackward.15") }
                     Button { model.send(.togglePlayback) } label: {
-                        Image(systemName: model.isPlaying ? "pause.fill" : "play.fill").frame(width: 30)
+                        Image(systemName: model.isPlaying ? "pause.fill" : "play.fill")
+                            .font(.system(size: 22, weight: .semibold))
+                            .frame(width: 42)
                     }
                     .buttonStyle(.borderedProminent)
                     Button { model.send(.seekBy(15)) } label: { Label("15", systemImage: "goforward.15") }
                     Spacer()
                     Image(systemName: "speaker.fill")
+                        .font(.system(size: 17))
                     Slider(
                         value: Binding(
                             get: { model.volume },
@@ -140,21 +149,31 @@ struct VideoControlsView: View {
                         ),
                         in: 0...1
                     )
-                    .frame(width: 125)
-                    Text("\(Int(model.volume * 100))%").monospacedDigit().frame(width: 42, alignment: .trailing)
+                    .frame(width: 190)
+                    Text("\(Int(model.volume * 100))%")
+                        .font(.system(size: 16, weight: .medium, design: .monospaced))
+                        .monospacedDigit()
+                        .frame(width: 54, alignment: .trailing)
                 }
                 .buttonStyle(.bordered)
 
-                HStack(spacing: 8) {
-                    Text("Projection").font(.system(size: 12, weight: .semibold)).foregroundStyle(.white.opacity(0.65)).frame(width: 72, alignment: .leading)
+                HStack(spacing: 11) {
+                    Text("Projection")
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.68))
+                        .frame(width: 92, alignment: .leading)
                     projectionButton("Flat", .flat)
                     projectionButton("VR180", .vr180Equirect)
                     projectionButton("Fisheye", .vr180Fisheye)
                     projectionButton("EAC360", .eac360)
+                    Spacer()
                 }
 
-                HStack(spacing: 8) {
-                    Text("Stereo").font(.system(size: 12, weight: .semibold)).foregroundStyle(.white.opacity(0.65)).frame(width: 72, alignment: .leading)
+                HStack(spacing: 11) {
+                    Text("Stereo")
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.68))
+                        .frame(width: 92, alignment: .leading)
                     stereoButton(.mono)
                     stereoButton(.sideBySide)
                     stereoButton(.topBottom)
@@ -162,11 +181,11 @@ struct VideoControlsView: View {
                 }
             }
             .foregroundStyle(.white)
-            .controlSize(.regular)
-            .padding(22)
+            .controlSize(.large)
+            .padding(30)
         }
-        .frame(width: 900, height: 325)
-        .padding(6)
+        .frame(width: 1220, height: 500)
+        .padding(8)
     }
 
     @ViewBuilder
