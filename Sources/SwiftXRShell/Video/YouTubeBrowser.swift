@@ -18,7 +18,6 @@ final class YouTubeBrowserController: NSObject {
     private static let typingSnapshotInterval: TimeInterval = 1.0 / 30.0
     private static let idleSnapshotInterval: TimeInterval = 1.0 / 12.0
     private static let scrollStepInterval: TimeInterval = 1.0 / 35.0
-    private static let continuationWakeInterval: TimeInterval = 1.0 / 8.0
     private static let scrollScale: Double = 900
     private static let maximumScrollStep: Double = 220
     private static let momentumDecay: Double = 0.82
@@ -41,8 +40,6 @@ final class YouTubeBrowserController: NSObject {
     private var scrollEvaluationPending = false
     private var lastScrollStep = Date.distantPast
     private var scrollActiveUntil = Date.distantPast
-    private var continuationWakePending = false
-    private var lastContinuationWake = Date.distantPast
 
     private weak var transformedApplication: XRMacApplication?
     private var previousEventTransformer: XRMacApplication.EventTransformer?
@@ -147,7 +144,6 @@ final class YouTubeBrowserController: NSObject {
         let scrolling = now < scrollActiveUntil
         if scrolling {
             needsSnapshot = true
-            wakeYouTubeContinuationIfNeeded(now: now)
         }
 
         let interval: TimeInterval
@@ -307,66 +303,6 @@ final class YouTubeBrowserController: NSObject {
         needsSnapshot = true
     }
 
-    private func wakeYouTubeContinuationIfNeeded(now: Date) {
-        guard !continuationWakePending else { return }
-        guard now.timeIntervalSince(lastContinuationWake) >= Self.continuationWakeInterval else { return }
-
-        continuationWakePending = true
-        lastContinuationWake = now
-
-        // Native wheel scrolling in WebKit can advance the asynchronous scrolling
-        // tree before page JavaScript catches up. YouTube loads more results from a
-        // ytd-continuation-item-renderer near the end of the document, normally via
-        // an intersection observer. Ask the web-content process to evaluate that
-        // region periodically while scrolling, and click YouTube's own fallback
-        // continuation button if it has chosen to expose one. This deliberately
-        // does not change scrollTop, so it cannot fight the smooth native scroll.
-        let script = """
-        (() => {
-          const root = document.scrollingElement || document.documentElement;
-          if (!root) return { action: 'no-root' };
-
-          const viewport = Math.max(window.innerHeight || 0, root.clientHeight || 0);
-          if (viewport <= 0) return { action: 'no-viewport' };
-
-          const remaining = root.scrollHeight - root.scrollTop - viewport;
-          if (remaining > Math.max(900, viewport * 1.25)) {
-            return { action: 'far', remaining };
-          }
-
-          const continuations = Array.from(document.querySelectorAll('ytd-continuation-item-renderer'));
-          for (let i = continuations.length - 1; i >= 0; --i) {
-            const continuation = continuations[i];
-            const rect = continuation.getBoundingClientRect();
-            if (rect.bottom < -64 || rect.top > viewport * 1.5) continue;
-
-            // Ensure any scroll-event-based fallback sees the reconciled layout.
-            window.dispatchEvent(new Event('scroll'));
-            document.dispatchEvent(new Event('scroll', { bubbles: true }));
-
-            const button = continuation.querySelector(
-              'button, tp-yt-paper-button, yt-button-shape button'
-            );
-            if (button && !button.disabled && button.getClientRects().length > 0) {
-              button.click();
-              return { action: 'clicked', remaining };
-            }
-
-            return { action: 'woke', remaining };
-          }
-
-          return { action: 'none', remaining };
-        })()
-        """
-
-        webView.evaluateJavaScript(script) { [weak self] _, _ in
-            Task { @MainActor in
-                guard let self else { return }
-                self.continuationWakePending = false
-            }
-        }
-    }
-
     private func stepScrollIfNeeded(now: Date, force: Bool = false) {
         guard !scrollEvaluationPending else { return }
         guard force || now.timeIntervalSince(lastScrollStep) >= Self.scrollStepInterval else { return }
@@ -414,8 +350,34 @@ final class YouTubeBrowserController: NSObject {
         const style = document.createElement('style');
         style.id = STYLE_ID;
         style.textContent = `
-          html { color-scheme: dark; background: #0f0f0f !important; }
-          body { background: #0f0f0f !important; }
+          html {
+            color-scheme: dark;
+            background: #0f0f0f !important;
+            overflow-y: scroll !important;
+            scrollbar-color: rgba(255,255,255,.58) rgba(255,255,255,.08);
+            scrollbar-width: auto;
+          }
+          body,
+          ytd-app,
+          ytd-page-manager,
+          ytd-search,
+          ytd-section-list-renderer {
+            background: #0f0f0f !important;
+          }
+          ::-webkit-scrollbar {
+            width: 14px !important;
+          }
+          ::-webkit-scrollbar-track {
+            background: rgba(255,255,255,.08) !important;
+          }
+          ::-webkit-scrollbar-thumb {
+            background: rgba(255,255,255,.58) !important;
+            border: 3px solid #0f0f0f !important;
+            border-radius: 10px !important;
+          }
+          ::-webkit-scrollbar-thumb:hover {
+            background: rgba(255,255,255,.78) !important;
+          }
           ytd-mini-guide-renderer { display: none !important; }
           ytd-app[mini-guide-visible] ytd-page-manager.ytd-app,
           ytd-app[guide-persistent-and-visible] ytd-page-manager.ytd-app {
@@ -423,6 +385,19 @@ final class YouTubeBrowserController: NSObject {
           }
           #guide { display: none !important; }
           ytd-popup-container tp-yt-paper-dialog { max-width: 90vw !important; }
+
+          /* YouTube search commonly inserts a Shorts shelf after the first few
+             ordinary results. In this off-screen WKWebView the shelf can retain
+             its large layout box even when its contents do not paint into the
+             snapshot, producing what looks like a huge blank section. We do not
+             use Shorts in the immersive-video browser, so remove only those
+             search-page shelf variants and leave normal video results intact. */
+          ytd-search ytd-reel-shelf-renderer,
+          ytd-search grid-shelf-view-model:has(.shortsLockupViewModelHost),
+          ytd-search grid-shelf-view-model:has(ytm-shorts-lockup-view-model),
+          ytd-search grid-shelf-view-model:has(ytm-shorts-lockup-view-model-v2) {
+            display: none !important;
+          }
         `;
         document.documentElement.appendChild(style);
       };
