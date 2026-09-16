@@ -37,7 +37,7 @@ struct ShellHomeView: View {
                     Spacer()
 
                     Button {
-                        model.recenter()
+                        ShellStageAnchor.shared.requestRecenter()
                     } label: {
                         Label("Recenter", systemImage: "scope")
                     }
