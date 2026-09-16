@@ -9,6 +9,7 @@ enum ExternalOpenXRLauncherError: Error, LocalizedError {
     case shellClientNotFound
     case openXRClientDidNotAppear(String)
     case launchedApplicationExited(String)
+    case couldNotTerminate(String)
 
     var errorDescription: String? {
         switch self {
@@ -24,6 +25,8 @@ enum ExternalOpenXRLauncherError: Error, LocalizedError {
             return "\(title) launched, but no new Monado OpenXR client appeared"
         case let .launchedApplicationExited(title):
             return "\(title) exited before creating an OpenXR client"
+        case let .couldNotTerminate(title):
+            return "Could not terminate \(title)"
         }
     }
 }
@@ -48,6 +51,10 @@ final class ExternalOpenXRLauncher {
 
     var isRunningExternalApplication: Bool {
         currentApplication != nil
+    }
+
+    var currentApplicationTitle: String? {
+        currentApplication?.title
     }
 
     func launch(_ application: ShellApplication, external: ExternalOpenXRApplication) throws {
@@ -84,6 +91,31 @@ final class ExternalOpenXRLauncher {
             try launchExecutable(external)
             startMonitoring()
         }
+    }
+
+    func terminateForegroundApplication() throws {
+        let title = currentApplication?.title ?? "OpenXR application"
+
+        if let process {
+            if process.isRunning {
+                process.terminate()
+            }
+            return
+        }
+
+        if let runningApplication {
+            if runningApplication.isTerminated {
+                return
+            }
+            if runningApplication.terminate() {
+                return
+            }
+            if runningApplication.forceTerminate() {
+                return
+            }
+        }
+
+        throw ExternalOpenXRLauncherError.couldNotTerminate(title)
     }
 
     func shutdown() {
