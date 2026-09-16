@@ -28,6 +28,7 @@ private final class SwiftXRShellAppDelegate: NSObject, NSApplicationDelegate {
     private var desktopMode: ShellDesktopMode?
     private var desktopEscapeMonitor: Any?
     private let externalLauncher = ExternalOpenXRLauncher()
+    private var systemOverlay: ShellSystemOverlayController?
 
     private var exitRequested = false
 
@@ -59,6 +60,7 @@ private final class SwiftXRShellAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        systemOverlay?.shutdown()
         externalLauncher.shutdown()
         removeDesktopEscapeMonitor()
         homePointerCapture?.stop()
@@ -70,7 +72,9 @@ private final class SwiftXRShellAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func setUpShell() throws {
-        GCController.shouldMonitorBackgroundEvents = false
+        // The system overlay must continue to receive its configured controller
+        // button while the launched XR application owns macOS foreground focus.
+        GCController.shouldMonitorBackgroundEvents = true
 
         let capabilities = try XRRuntime.capabilities()
         try capabilities.requireMetal()
@@ -104,6 +108,26 @@ private final class SwiftXRShellAppDelegate: NSObject, NSApplicationDelegate {
         self.homeRenderer = renderer
         self.homePointerCapture = pointerCapture
 
+        let settings: ShellSettings
+        do {
+            settings = try ShellSettings.load()
+            print(
+                "[overlay] system menu trigger: \(settings.systemOverlayButton.rawValue) ("
+                    + ShellSettings.settingsURL.path + ")"
+            )
+        } catch {
+            settings = ShellSettings()
+            print("[overlay] could not load settings; using Home/PS button: \(error)")
+        }
+
+        let systemOverlay = ShellSystemOverlayController(
+            triggerButton: settings.systemOverlayButton
+        )
+        systemOverlay.onQuitApplication = { [weak self] in
+            self?.quitExternalApplicationFromOverlay()
+        }
+        self.systemOverlay = systemOverlay
+
         do {
             let externalApplications = try ExternalApplicationCatalog.loadApplications()
             model.replaceExternalApplications(externalApplications)
@@ -116,8 +140,9 @@ private final class SwiftXRShellAppDelegate: NSObject, NSApplicationDelegate {
             print("[shell] catalog path: \(ExternalApplicationCatalog.catalogURL.path)")
         }
 
-        externalLauncher.onSwitchedToApplication = { client in
+        externalLauncher.onSwitchedToApplication = { [weak self] client in
             print("[shell] external application is primary/focused: \(client.name)")
+            self?.systemOverlay?.foregroundApplicationDidBecomeActive()
         }
         externalLauncher.onReturnedToShell = { [weak self] in
             self?.returnHomeFromExternal()
@@ -212,10 +237,22 @@ private final class SwiftXRShellAppDelegate: NSObject, NSApplicationDelegate {
         leaveHomeInput()
         mode = .external
 
+        // Create the overlay client before the launcher snapshots Monado's
+        // existing clients, so it can never be mistaken for the new foreground
+        // application. Overlay support is optional: a failure here should not
+        // stop the requested XR application from launching.
+        do {
+            try systemOverlay?.prepare(applicationTitle: application.title)
+        } catch {
+            systemOverlay?.shutdown()
+            print("[overlay] unavailable for this launch: \(error)")
+        }
+
         do {
             try externalLauncher.launch(application, external: external)
             print("[shell] launched \(application.title); waiting for its Monado client")
         } catch {
+            systemOverlay?.shutdown()
             mode = .home
             throw error
         }
@@ -243,6 +280,7 @@ private final class SwiftXRShellAppDelegate: NSObject, NSApplicationDelegate {
 
     private func returnHomeFromExternal() {
         guard mode == .external else { return }
+        systemOverlay?.shutdown()
         finishReturningHome()
     }
 
@@ -260,8 +298,28 @@ private final class SwiftXRShellAppDelegate: NSObject, NSApplicationDelegate {
         print("[shell] returned Home")
     }
 
+    private func quitExternalApplicationFromOverlay() {
+        guard mode == .external else { return }
+
+        do {
+            let title = externalLauncher.currentApplicationTitle ?? "OpenXR application"
+            try externalLauncher.terminateForegroundApplication()
+            print("[overlay] requested termination of \(title)")
+        } catch {
+            systemOverlay?.quitRequestFailed()
+            fputs("swiftxr-shell overlay quit: \(error)\n", stderr)
+
+            let alert = NSAlert()
+            alert.alertStyle = .warning
+            alert.messageText = "Could not quit OpenXR application"
+            alert.informativeText = error.localizedDescription
+            alert.runModal()
+        }
+    }
+
     private func handleExternalLaunchError(_ error: Error) {
         fputs("swiftxr-shell external launch: \(error)\n", stderr)
+        systemOverlay?.shutdown()
 
         if mode == .external {
             finishReturningHome()
@@ -287,12 +345,20 @@ private final class SwiftXRShellAppDelegate: NSObject, NSApplicationDelegate {
             try session.pollEvents()
 
             if session.shouldExit {
+                systemOverlay?.shutdown()
                 externalLauncher.shutdown()
                 homePointerCapture?.stop()
                 videoMode?.shutdown()
                 desktopMode?.deactivate()
                 NSApplication.shared.terminate(nil)
                 return
+            }
+
+            // The Shell's primary session can become non-visible/non-running
+            // while an external primary app owns the HMD. Drive the independent
+            // overlay session before checking the primary Shell session state.
+            if mode == .external {
+                try systemOverlay?.renderFrame()
             }
 
             guard session.isRunning else {
@@ -425,6 +491,7 @@ private final class SwiftXRShellAppDelegate: NSObject, NSApplicationDelegate {
     private func requestSessionExitIfNeeded() throws {
         guard !exitRequested else { return }
         exitRequested = true
+        systemOverlay?.shutdown()
         externalLauncher.shutdown()
         homePointerCapture?.stop()
         videoMode?.shutdown()
@@ -447,6 +514,7 @@ private final class SwiftXRShellAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func fail(_ error: Error) {
+        systemOverlay?.shutdown()
         externalLauncher.shutdown()
         homePointerCapture?.stop()
         videoMode?.shutdown()
