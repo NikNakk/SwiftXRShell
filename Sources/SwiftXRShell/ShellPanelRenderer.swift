@@ -79,6 +79,7 @@ final class ShellPanelRenderer {
     ) throws {
         guard frame.views.count >= 2 else { return }
 
+        ShellStageAnchor.shared.updateIfNeeded(from: frame)
         let textureAspect = Float(panelTexture.width) / Float(max(panelTexture.height, 1))
         let model = ShellStageAnchor.shared.modelMatrix(
             worldWidth: worldWidth,
