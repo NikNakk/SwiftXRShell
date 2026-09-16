@@ -2,6 +2,11 @@ import Metal
 import simd
 import SwiftXR
 
+enum ShellPanelPlacement {
+    case stage
+    case headLocked
+}
+
 private struct ShellPanelVertex {
     var position: SIMD3<Float>
     var uv: SIMD2<Float>
@@ -20,6 +25,8 @@ final class ShellPanelRenderer {
     private let panelTexture: any MTLTexture
     private let worldWidth: Float
     private let distance: Float
+    private let placement: ShellPanelPlacement
+    private let transparentBackground: Bool
 
     var pointerPosition: SIMD2<Float>?
 
@@ -28,11 +35,15 @@ final class ShellPanelRenderer {
         swapchain: XRSwapchain,
         panelTexture: any MTLTexture,
         worldWidth: Float = 2.40,
-        distance: Float = ShellStageAnchor.defaultDistance
+        distance: Float = ShellStageAnchor.defaultDistance,
+        placement: ShellPanelPlacement = .stage,
+        transparentBackground: Bool = false
     ) throws {
         self.panelTexture = panelTexture
         self.worldWidth = worldWidth
         self.distance = distance
+        self.placement = placement
+        self.transparentBackground = transparentBackground
 
         let library = try device.makeLibrary(source: Self.shaderSource, options: nil)
         let descriptor = MTLRenderPipelineDescriptor()
@@ -79,13 +90,22 @@ final class ShellPanelRenderer {
     ) throws {
         guard frame.views.count >= 2 else { return }
 
-        ShellStageAnchor.shared.updateIfNeeded(from: frame)
         let textureAspect = Float(panelTexture.width) / Float(max(panelTexture.height, 1))
-        let model = ShellStageAnchor.shared.modelMatrix(
-            worldWidth: worldWidth,
-            textureAspect: textureAspect,
-            distance: distance
-        )
+        let model: simd_float4x4
+        switch placement {
+        case .stage:
+            ShellStageAnchor.shared.updateIfNeeded(from: frame)
+            model = ShellStageAnchor.shared.modelMatrix(
+                worldWidth: worldWidth,
+                textureAspect: textureAspect,
+                distance: distance
+            )
+        case .headLocked:
+            model = headLockedModelMatrix(
+                frame: frame,
+                textureAspect: textureAspect
+            )
+        }
 
         for eye in 0..<2 {
             let pass = MTLRenderPassDescriptor()
@@ -93,12 +113,9 @@ final class ShellPanelRenderer {
             pass.colorAttachments[0].slice = eye
             pass.colorAttachments[0].loadAction = .clear
             pass.colorAttachments[0].storeAction = .store
-            pass.colorAttachments[0].clearColor = MTLClearColor(
-                red: 0.008,
-                green: 0.012,
-                blue: 0.022,
-                alpha: 1
-            )
+            pass.colorAttachments[0].clearColor = transparentBackground
+                ? MTLClearColor(red: 0, green: 0, blue: 0, alpha: 0)
+                : MTLClearColor(red: 0.008, green: 0.012, blue: 0.022, alpha: 1)
 
             guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: pass) else {
                 throw ShellPanelRendererError.encoderCreationFailed
@@ -133,6 +150,43 @@ final class ShellPanelRenderer {
             encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: vertexCount)
             encoder.endEncoding()
         }
+    }
+
+    private func headLockedModelMatrix(
+        frame: XRFrame,
+        textureAspect: Float
+    ) -> simd_float4x4 {
+        let left = frame.views[0]
+        let rightView = frame.views[1]
+        let orientation = simd_quatf(
+            ix: left.pose.orientation.x,
+            iy: left.pose.orientation.y,
+            iz: left.pose.orientation.z,
+            r: left.pose.orientation.w
+        )
+        let leftPosition = SIMD3<Float>(
+            left.pose.position.x,
+            left.pose.position.y,
+            left.pose.position.z
+        )
+        let rightPosition = SIMD3<Float>(
+            rightView.pose.position.x,
+            rightView.pose.position.y,
+            rightView.pose.position.z
+        )
+        let headPosition = (leftPosition + rightPosition) * 0.5
+        let right = simd_normalize(orientation.act(SIMD3<Float>(1, 0, 0)))
+        let up = simd_normalize(orientation.act(SIMD3<Float>(0, 1, 0)))
+        let forward = simd_normalize(orientation.act(SIMD3<Float>(0, 0, -1)))
+        let worldHeight = worldWidth / max(textureAspect, 0.001)
+        let center = headPosition + forward * distance
+
+        return simd_float4x4(columns: (
+            SIMD4<Float>(right * worldWidth, 0),
+            SIMD4<Float>(up * worldHeight, 0),
+            SIMD4<Float>(-forward, 0),
+            SIMD4<Float>(center, 1)
+        ))
     }
 
     private static let shaderSource = """
