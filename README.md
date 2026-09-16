@@ -23,6 +23,7 @@ The repository currently contains a runnable Home shell with built-in Video and 
 - explicit external application catalog;
 - `.app` bundle and raw executable launching;
 - Monado primary/focused-client handoff through SwiftXR's optional `libmonado` wrapper;
+- an `XR_EXTX_overlay` system menu that can be opened over a launched application from a controller button;
 - automatic return to Home when the launched OpenXR client disconnects.
 
 ## Build
@@ -99,6 +100,39 @@ XR_RUNTIME_JSON=~/Code/monado/build-macos-psvr2-display/openxr_monado-dev.json \
 swift run swiftxr-shell
 ```
 
+## System overlay
+
+When SwiftXR Shell launches an external XR application, it also creates a small independent OpenXR overlay session using `XR_EXTX_overlay`. The overlay normally submits no visible layer. Pressing the configured controller button displays a small head-locked menu over the foreground XR application.
+
+The default trigger is `home`, which maps to `GCExtendedGamepad.buttonHome` and is intended to be the PS button on a DualSense controller. SwiftXR Shell enables GameController background monitoring while an external application has macOS foreground focus.
+
+The menu controls are:
+
+- configured trigger button: show/hide the overlay;
+- D-pad up/down: select Resume or Quit Application;
+- Cross / A: activate the selected action;
+- Circle / B: resume and hide the overlay.
+
+`Quit Application` asks the macOS process launched by SwiftXR Shell to terminate. When its Monado client disappears, the existing launcher handoff code restores SwiftXR Shell as primary/focused and returns to Home. The current implementation therefore quits applications launched by SwiftXR Shell; arbitrary OpenXR applications started outside the Shell are not yet process-managed.
+
+The first run creates:
+
+```text
+~/Library/Application Support/SwiftXRShell/settings.json
+```
+
+with:
+
+```json
+{
+  "systemOverlayButton": "home"
+}
+```
+
+Supported values are `home`, `menu`, and `options`. Restart SwiftXR Shell after changing the setting.
+
+The runtime must expose `XR_EXTX_overlay` for the true composited overlay. If overlay creation fails, the external application still launches and the failure is logged; the system menu is simply unavailable for that launch.
+
 ## Virtual desktop size
 
 The virtual desktop preserves the captured display's aspect ratio. Its default physical width is **3.2 metres** at the current 2.0 metre viewing distance.
@@ -124,13 +158,15 @@ SwiftXR Shell
 ├── integrated Virtual Desktop
 ├── external OpenXR application catalog + launch
 └── persistent system environment
-    ├── Resume
+    ├── controller-triggered XR overlay
+    │   ├── Resume
+    │   └── Quit Application
     ├── Home
     ├── Settings
     └── Quit
          ↓
        SwiftXR
-         ├── OpenXR wrapper
+         ├── OpenXR wrapper + XR_EXTX_overlay support
          └── optional Monado runtime control
                ↓
           OpenXR runtime / Monado service
