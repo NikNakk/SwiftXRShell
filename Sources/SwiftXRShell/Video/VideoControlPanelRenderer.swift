@@ -68,9 +68,10 @@ final class VideoControlPanelRenderer {
         vertexBuffer = buffer
     }
 
-    /// The Shell UI itself stays on the persistent shared stage. Recenter still
-    /// recenters immersive video content, but entering a mode never moves the UI.
-    func recenter() {}
+    /// Panel recentering is owned globally by ShellStageAnchor.
+    func recenter() {
+        ShellStageAnchor.shared.requestRecenter()
+    }
 
     func encode(
         frame: XRFrame,
@@ -85,8 +86,7 @@ final class VideoControlPanelRenderer {
     ) throws {
         guard frame.views.count >= 2 else { return }
 
-        // Use one Shell-owned stage for Home, Video and Desktop. Ignore the
-        // historical per-mode distance/offset arguments so mode switches do not jump.
+        ShellStageAnchor.shared.updateIfNeeded(from: frame)
         let model = ShellStageAnchor.shared.modelMatrix(
             worldWidth: worldWidth,
             textureAspect: textureAspect,
