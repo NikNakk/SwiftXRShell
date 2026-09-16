@@ -7,6 +7,8 @@ struct ResolvedMediaInput: Sendable {
     let originalInput: String
 }
 
+typealias MediaInputProgressHandler = @Sendable (String) -> Void
+
 enum MediaInputError: Error, CustomStringConvertible {
     case noInput
     case fileDoesNotExist(String)
@@ -28,7 +30,10 @@ enum MediaInputError: Error, CustomStringConvertible {
 }
 
 enum MediaInputResolver {
-    static func resolve(_ input: String) throws -> ResolvedMediaInput {
+    static func resolve(
+        _ input: String,
+        progress: MediaInputProgressHandler? = nil
+    ) throws -> ResolvedMediaInput {
         guard !input.isEmpty else { throw MediaInputError.noInput }
 
         if !isHTTPURL(input) {
@@ -43,7 +48,7 @@ enum MediaInputResolver {
                 originalInput: input
             )
         }
-        return try resolveYouTube(input)
+        return try resolveYouTube(input, progress: progress)
     }
 
     private static func isHTTPURL(_ value: String) -> Bool {
@@ -158,7 +163,11 @@ enum MediaInputResolver {
         return nil
     }
 
-    private static func discoverMultichannelFormatID(_ input: String) -> String? {
+    private static func discoverMultichannelFormatID(
+        _ input: String,
+        progress: MediaInputProgressHandler?
+    ) -> String? {
+        progress?("Checking spatial audio…")
         guard let result = try? run(
             "yt-dlp",
             [
@@ -203,15 +212,17 @@ enum MediaInputResolver {
     private static func downloadAmbisonicFile(
         cache: URL,
         input: String,
-        videoID: String?
+        videoID: String?,
+        progress: MediaInputProgressHandler?
     ) -> URL? {
         let environment = ProcessInfo.processInfo.environment
         if (environment["SWIFTXR_AMBISONIC_AUDIO"] ?? environment["GAV_AMBISONIC_AUDIO"])?
             .lowercased() == "off" {
             return nil
         }
-        guard let formatID = discoverMultichannelFormatID(input) else { return nil }
+        guard let formatID = discoverMultichannelFormatID(input, progress: progress) else { return nil }
 
+        progress?("Starting spatial-audio download…")
         let template = cache
             .appendingPathComponent("%(title)s [YT] [%(id)s] ambisonic.%(ext)s")
             .path
@@ -224,9 +235,15 @@ enum MediaInputResolver {
                 "--format", formatID,
                 "--output", template,
                 "--print", "after_move:filepath",
+                "--progress",
+                "--newline",
+                "--progress-delta", "0.25",
+                "--progress-template", "download:SWIFTXR_PROGRESS|%(progress._default_template)s",
                 input,
             ],
-            suppressStderr: false
+            suppressStderr: false,
+            progressStage: "Spatial audio",
+            progress: progress
         ), result.status == 0 else { return nil }
 
         let path = result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -239,18 +256,28 @@ enum MediaInputResolver {
         return nil
     }
 
-    private static func resolveYouTube(_ input: String) throws -> ResolvedMediaInput {
+    private static func resolveYouTube(
+        _ input: String,
+        progress: MediaInputProgressHandler?
+    ) throws -> ResolvedMediaInput {
         let cache = try cacheDirectory()
         let videoID = youtubeVideoID(input)
 
         var ambisonic = findCachedAmbisonicFile(cache: cache, videoID: videoID)
         if ambisonic == nil {
-            ambisonic = downloadAmbisonicFile(cache: cache, input: input, videoID: videoID)
+            ambisonic = downloadAmbisonicFile(
+                cache: cache,
+                input: input,
+                videoID: videoID,
+                progress: progress
+            )
         }
 
+        progress?("Checking YouTube cache…")
         if let cached = findCachedYouTubeFile(cache: cache, videoID: videoID) {
             let eac = filenameSuggestsEAC(cached.path)
             print("[youtube] cache hit: \(cached.path)\(eac ? " (EAC360)" : "")")
+            progress?("Using cached YouTube video…")
             return ResolvedMediaInput(
                 url: cached,
                 youtubeEACHint: eac,
@@ -260,6 +287,7 @@ enum MediaInputResolver {
         }
 
         print("[youtube] downloading media with yt-dlp…")
+        progress?("Starting video download…")
         let template = cache
             .appendingPathComponent("%(title)s [YT] [%(id)s] [%(width)sx%(height)s].%(ext)s")
             .path
@@ -273,14 +301,21 @@ enum MediaInputResolver {
                 "--write-info-json",
                 "--output", template,
                 "--print", "after_move:filepath",
+                "--progress",
+                "--newline",
+                "--progress-delta", "0.25",
+                "--progress-template", "download:SWIFTXR_PROGRESS|%(progress._default_template)s",
                 input,
             ],
-            suppressStderr: false
+            suppressStderr: false,
+            progressStage: "Video",
+            progress: progress
         )
         guard result.status == 0 else {
             throw MediaInputError.commandFailed("yt-dlp", result.status)
         }
 
+        progress?("Preparing downloaded video…")
         let path = result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !path.isEmpty, FileManager.default.fileExists(atPath: path) else {
             throw MediaInputError.noDownloadedFile
@@ -303,7 +338,9 @@ enum MediaInputResolver {
     private static func run(
         _ executable: String,
         _ arguments: [String],
-        suppressStderr: Bool
+        suppressStderr: Bool,
+        progressStage: String? = nil,
+        progress: MediaInputProgressHandler? = nil
     ) throws -> ProcessResult {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
@@ -311,18 +348,76 @@ enum MediaInputResolver {
 
         let output = Pipe()
         process.standardOutput = output
-        process.standardError = suppressStderr ? FileHandle.nullDevice : FileHandle.standardError
+
+        let progressPipe: Pipe?
+        if progress != nil, progressStage != nil {
+            let pipe = Pipe()
+            process.standardError = pipe
+            progressPipe = pipe
+        } else {
+            process.standardError = suppressStderr ? FileHandle.nullDevice : FileHandle.standardError
+            progressPipe = nil
+        }
 
         do {
             try process.run()
         } catch {
             throw MediaInputError.commandLaunch(executable, error.localizedDescription)
         }
-        let data = output.fileHandleForReading.readDataToEndOfFile()
+
+        if let progressPipe, let progressStage {
+            progressPipe.fileHandleForWriting.closeFile()
+            var pending = ""
+            while true {
+                let data = progressPipe.fileHandleForReading.availableData
+                if data.isEmpty { break }
+                pending += String(decoding: data, as: UTF8.self)
+
+                while let newline = pending.firstIndex(of: "\n") {
+                    let line = String(pending[..<newline]).trimmingCharacters(in: .whitespacesAndNewlines)
+                    pending.removeSubrange(...newline)
+                    handleStderrLine(
+                        line,
+                        suppressStderr: suppressStderr,
+                        progressStage: progressStage,
+                        progress: progress
+                    )
+                }
+            }
+            let finalLine = pending.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !finalLine.isEmpty {
+                handleStderrLine(
+                    finalLine,
+                    suppressStderr: suppressStderr,
+                    progressStage: progressStage,
+                    progress: progress
+                )
+            }
+        }
+
         process.waitUntilExit()
+        let data = output.fileHandleForReading.readDataToEndOfFile()
         return ProcessResult(
             status: process.terminationStatus,
             stdout: String(data: data, encoding: .utf8) ?? ""
         )
+    }
+
+    private static func handleStderrLine(
+        _ line: String,
+        suppressStderr: Bool,
+        progressStage: String,
+        progress: MediaInputProgressHandler?
+    ) {
+        let marker = "SWIFTXR_PROGRESS|"
+        if line.hasPrefix(marker) {
+            let detail = String(line.dropFirst(marker.count))
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if !detail.isEmpty {
+                progress?("\(progressStage) • \(detail)")
+            }
+        } else if !suppressStderr, !line.isEmpty {
+            fputs("\(line)\n", stderr)
+        }
     }
 }
