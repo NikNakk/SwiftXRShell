@@ -218,11 +218,22 @@ final class ShellVideoMode {
         mediaOpenTask = Task { @MainActor [weak self] in
             guard let self else { return }
             do {
+                let progress: MediaInputProgressHandler = { [weak self] message in
+                    Task { @MainActor [weak self] in
+                        guard let self, generation == self.mediaOpenGeneration else { return }
+                        self.libraryModel.showLoading(message)
+                        self.panel.invalidate()
+                    }
+                }
+
                 let resolved = try await Task.detached(priority: .userInitiated) {
-                    try MediaInputResolver.resolve(input)
+                    try MediaInputResolver.resolve(input, progress: progress)
                 }.value
                 try Task.checkCancellation()
                 guard generation == self.mediaOpenGeneration else { return }
+
+                self.libraryModel.showLoading("Preparing playback…")
+                self.panel.invalidate()
 
                 let projectionMode = VideoProjectionMode.resolve(
                     inputPath: resolved.url.path,
