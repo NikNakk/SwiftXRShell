@@ -102,7 +102,10 @@ struct VideoControlsView: View {
                         Label("YouTube", systemImage: "play.rectangle.fill")
                     }
                     .buttonStyle(.borderedProminent)
-                    Button { model.send(.recenter) } label: {
+                    Button {
+                        ShellStageAnchor.shared.requestRecenter()
+                        model.send(.recenter)
+                    } label: {
                         Label("Recenter", systemImage: "scope")
                     }
                     .buttonStyle(.bordered)
