@@ -10,6 +10,7 @@ private final class SwiftXRShellAppDelegate: NSObject, NSApplicationDelegate {
         case home
         case video
         case desktop
+        case external
     }
 
     private var mode: Mode = .home
@@ -26,6 +27,7 @@ private final class SwiftXRShellAppDelegate: NSObject, NSApplicationDelegate {
     private var videoMode: ShellVideoMode?
     private var desktopMode: ShellDesktopMode?
     private var desktopEscapeMonitor: Any?
+    private let externalLauncher = ExternalOpenXRLauncher()
 
     private var exitRequested = false
 
@@ -48,9 +50,7 @@ private final class SwiftXRShellAppDelegate: NSObject, NSApplicationDelegate {
             switch mode {
             case .home:
                 try startHomePointerCaptureIfReady()
-            case .video:
-                break
-            case .desktop:
+            case .video, .desktop, .external:
                 break
             }
         } catch {
@@ -59,6 +59,7 @@ private final class SwiftXRShellAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        externalLauncher.shutdown()
         removeDesktopEscapeMonitor()
         homePointerCapture?.stop()
         videoMode?.shutdown()
@@ -103,6 +104,28 @@ private final class SwiftXRShellAppDelegate: NSObject, NSApplicationDelegate {
         self.homeRenderer = renderer
         self.homePointerCapture = pointerCapture
 
+        do {
+            let externalApplications = try ExternalApplicationCatalog.loadApplications()
+            model.replaceExternalApplications(externalApplications)
+            print(
+                "[shell] loaded \(externalApplications.count) external application(s) from "
+                    + ExternalApplicationCatalog.catalogURL.path
+            )
+        } catch {
+            print("[shell] could not load external application catalog: \(error)")
+            print("[shell] catalog path: \(ExternalApplicationCatalog.catalogURL.path)")
+        }
+
+        externalLauncher.onSwitchedToApplication = { client in
+            print("[shell] external application is primary/focused: \(client.name)")
+        }
+        externalLauncher.onReturnedToShell = { [weak self] in
+            self?.returnHomeFromExternal()
+        }
+        externalLauncher.onError = { [weak self] error in
+            self?.handleExternalLaunchError(error)
+        }
+
         model.commandHandler = { [weak self] command in
             guard let self else { return }
             switch command {
@@ -110,7 +133,11 @@ private final class SwiftXRShellAppDelegate: NSObject, NSApplicationDelegate {
                 do {
                     try self.launch(application)
                 } catch {
-                    self.fail(error)
+                    if case .external = application.kind {
+                        self.handleExternalLaunchError(error)
+                    } else {
+                        self.fail(error)
+                    }
                 }
             case .settings:
                 print("Shell settings requested (not implemented yet)")
@@ -118,7 +145,7 @@ private final class SwiftXRShellAppDelegate: NSObject, NSApplicationDelegate {
         }
 
         print("SwiftXR Shell ready")
-        print("Video and Desktop now run in-process on the Shell OpenXR session")
+        print("Video and Desktop run in-process on the Shell OpenXR session")
     }
 
     private func launch(_ application: ShellApplication) throws {
@@ -128,7 +155,7 @@ private final class SwiftXRShellAppDelegate: NSObject, NSApplicationDelegate {
         case .virtualDesktop:
             enterDesktop()
         case let .external(external):
-            print("External OpenXR launch not implemented yet: \(external.executableURL.path)")
+            try enterExternal(application, external: external)
         }
     }
 
@@ -176,6 +203,24 @@ private final class SwiftXRShellAppDelegate: NSObject, NSApplicationDelegate {
         print("[shell] Desktop active — Escape returns to launcher")
     }
 
+    private func enterExternal(
+        _ application: ShellApplication,
+        external: ExternalOpenXRApplication
+    ) throws {
+        guard mode == .home else { return }
+
+        leaveHomeInput()
+        mode = .external
+
+        do {
+            try externalLauncher.launch(application, external: external)
+            print("[shell] launched \(application.title); waiting for its Monado client")
+        } catch {
+            mode = .home
+            throw error
+        }
+    }
+
     private func returnHome() {
         guard mode != .home else { return }
 
@@ -187,19 +232,46 @@ private final class SwiftXRShellAppDelegate: NSObject, NSApplicationDelegate {
             desktopMode?.deactivate()
             desktopMode = nil
             removeDesktopEscapeMonitor()
+        case .external:
+            return
         case .home:
             break
         }
 
+        finishReturningHome()
+    }
+
+    private func returnHomeFromExternal() {
+        guard mode == .external else { return }
+        finishReturningHome()
+    }
+
+    private func finishReturningHome() {
         mode = .home
+        NSApplication.shared.activate(ignoringOtherApps: true)
         homePanel?.interaction.movePointer(to: SIMD2<Float>(0.5, 0.5))
         homePanel?.invalidate()
         do {
             try startHomePointerCaptureIfReady()
         } catch {
             fail(error)
+            return
         }
         print("[shell] returned Home")
+    }
+
+    private func handleExternalLaunchError(_ error: Error) {
+        fputs("swiftxr-shell external launch: \(error)\n", stderr)
+
+        if mode == .external {
+            finishReturningHome()
+        }
+
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Could not launch OpenXR application"
+        alert.informativeText = error.localizedDescription
+        alert.runModal()
     }
 
     private func leaveHomeInput() {
@@ -215,6 +287,7 @@ private final class SwiftXRShellAppDelegate: NSObject, NSApplicationDelegate {
             try session.pollEvents()
 
             if session.shouldExit {
+                externalLauncher.shutdown()
                 homePointerCapture?.stop()
                 videoMode?.shutdown()
                 desktopMode?.deactivate()
@@ -234,6 +307,8 @@ private final class SwiftXRShellAppDelegate: NSObject, NSApplicationDelegate {
                 try videoMode?.renderFrame()
             case .desktop:
                 try desktopMode?.renderFrame()
+            case .external:
+                _ = try session.nextFrame()
             }
 
             scheduleFrameStep()
@@ -350,6 +425,7 @@ private final class SwiftXRShellAppDelegate: NSObject, NSApplicationDelegate {
     private func requestSessionExitIfNeeded() throws {
         guard !exitRequested else { return }
         exitRequested = true
+        externalLauncher.shutdown()
         homePointerCapture?.stop()
         videoMode?.shutdown()
         desktopMode?.deactivate()
@@ -371,6 +447,7 @@ private final class SwiftXRShellAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func fail(_ error: Error) {
+        externalLauncher.shutdown()
         homePointerCapture?.stop()
         videoMode?.shutdown()
         desktopMode?.deactivate()
