@@ -1,4 +1,5 @@
 import AppKit
+import Darwin
 import Foundation
 import SwiftXR
 
@@ -39,6 +40,7 @@ final class ExternalOpenXRLauncher {
 
     private var monado: XRMonadoRuntimeControl?
     private var monitorTask: Task<Void, Never>?
+    private var terminationFallbackTask: Task<Void, Never>?
 
     private var baselineClientIDs = Set<UInt32>()
     private var shellClientID: UInt32?
@@ -99,6 +101,7 @@ final class ExternalOpenXRLauncher {
         if let process {
             if process.isRunning {
                 process.terminate()
+                scheduleForcedTermination()
             }
             return
         }
@@ -108,6 +111,7 @@ final class ExternalOpenXRLauncher {
                 return
             }
             if runningApplication.terminate() {
+                scheduleForcedTermination()
                 return
             }
             if runningApplication.forceTerminate() {
@@ -121,6 +125,8 @@ final class ExternalOpenXRLauncher {
     func shutdown() {
         monitorTask?.cancel()
         monitorTask = nil
+        terminationFallbackTask?.cancel()
+        terminationFallbackTask = nil
         clearLaunchState()
     }
 
@@ -180,6 +186,25 @@ final class ExternalOpenXRLauncher {
                 guard let self, self.currentApplication != nil else { return }
                 self.pollMonadoClients()
                 try? await Task.sleep(nanoseconds: 150_000_000)
+            }
+        }
+    }
+
+    private func scheduleForcedTermination() {
+        terminationFallbackTask?.cancel()
+        terminationFallbackTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            guard let self, !Task.isCancelled, self.currentApplication != nil else { return }
+
+            if let process = self.process, process.isRunning {
+                print("[shell] launched process ignored terminate; sending SIGKILL")
+                _ = Darwin.kill(process.processIdentifier, SIGKILL)
+            }
+
+            if let runningApplication = self.runningApplication,
+               !runningApplication.isTerminated {
+                print("[shell] launched application ignored terminate; force terminating")
+                _ = runningApplication.forceTerminate()
             }
         }
     }
@@ -275,6 +300,8 @@ final class ExternalOpenXRLauncher {
 
         monitorTask?.cancel()
         monitorTask = nil
+        terminationFallbackTask?.cancel()
+        terminationFallbackTask = nil
         clearLaunchState()
         onReturnedToShell?()
     }
@@ -290,6 +317,8 @@ final class ExternalOpenXRLauncher {
 
         monitorTask?.cancel()
         monitorTask = nil
+        terminationFallbackTask?.cancel()
+        terminationFallbackTask = nil
         clearLaunchState()
         onError?(error)
     }
