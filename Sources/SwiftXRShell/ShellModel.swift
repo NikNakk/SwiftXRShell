@@ -4,6 +4,7 @@ import SwiftUI
 @MainActor
 enum ShellCommand {
     case launch(ShellApplication)
+    case recenter
     case settings
 }
 
@@ -54,6 +55,10 @@ final class ShellModel: ObservableObject {
 
     func launch(_ application: ShellApplication) {
         commandHandler?(.launch(application))
+    }
+
+    func recenter() {
+        commandHandler?(.recenter)
     }
 
     func openSettings() {
