@@ -68,10 +68,10 @@ final class VideoControlPanelRenderer {
         vertexBuffer = buffer
     }
 
-    /// Panel recentering is owned globally by ShellStageAnchor.
-    func recenter() {
-        ShellStageAnchor.shared.requestRecenter()
-    }
+    /// Kept for the existing Video mode lifecycle. Ordinary mode/panel changes
+    /// must not move the shared Shell stage; explicit Recenter controls request
+    /// that separately through ShellStageAnchor.
+    func recenter() {}
 
     func encode(
         frame: XRFrame,
