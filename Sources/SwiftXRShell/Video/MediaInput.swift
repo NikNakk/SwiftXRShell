@@ -365,13 +365,17 @@ enum MediaInputResolver {
             throw MediaInputError.commandLaunch(executable, error.localizedDescription)
         }
 
+        let data: Data
         if let progressPipe, let progressStage {
+            // Progress-producing yt-dlp commands write only the final filepath to
+            // stdout, so drain their continuously-active stderr progress stream
+            // first. stdout remains tiny in this mode.
             progressPipe.fileHandleForWriting.closeFile()
             var pending = ""
             while true {
-                let data = progressPipe.fileHandleForReading.availableData
-                if data.isEmpty { break }
-                pending += String(decoding: data, as: UTF8.self)
+                let chunk = progressPipe.fileHandleForReading.availableData
+                if chunk.isEmpty { break }
+                pending += String(decoding: chunk, as: UTF8.self)
 
                 while let newline = pending.firstIndex(of: "\n") {
                     let line = String(pending[..<newline]).trimmingCharacters(in: .whitespacesAndNewlines)
@@ -393,10 +397,17 @@ enum MediaInputResolver {
                     progress: progress
                 )
             }
+
+            process.waitUntilExit()
+            data = output.fileHandleForReading.readDataToEndOfFile()
+        } else {
+            // Commands such as `yt-dlp -J` can emit hundreds of KB of JSON.
+            // Drain stdout while the child is running; waiting first can fill the
+            // pipe buffer and deadlock child and parent against each other.
+            data = output.fileHandleForReading.readDataToEndOfFile()
+            process.waitUntilExit()
         }
 
-        process.waitUntilExit()
-        let data = output.fileHandleForReading.readDataToEndOfFile()
         return ProcessResult(
             status: process.terminationStatus,
             stdout: String(data: data, encoding: .utf8) ?? ""
