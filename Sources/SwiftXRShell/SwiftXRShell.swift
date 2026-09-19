@@ -28,7 +28,9 @@ private final class SwiftXRShellAppDelegate: NSObject, NSApplicationDelegate {
     private var desktopMode: ShellDesktopMode?
     private var desktopEscapeMonitor: Any?
     private let externalLauncher = ExternalOpenXRLauncher()
+    private let externalActivityMonitor = ExternalOpenXRActivityMonitor()
     private var systemOverlay: ShellSystemOverlayController?
+    private var resumeModeAfterObservedExternal: Mode?
 
     private var exitRequested = false
 
@@ -61,6 +63,7 @@ private final class SwiftXRShellAppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         systemOverlay?.shutdown()
+        externalActivityMonitor.shutdown()
         externalLauncher.shutdown()
         removeDesktopEscapeMonitor()
         homePointerCapture?.stop()
@@ -151,6 +154,29 @@ private final class SwiftXRShellAppDelegate: NSObject, NSApplicationDelegate {
             self?.handleExternalLaunchError(error)
         }
 
+        externalActivityMonitor.canTakeOver = { [weak self] in
+            guard let self else { return false }
+            guard !self.externalLauncher.isRunningExternalApplication else {
+                return false
+            }
+
+            // The first automatic handoff milestone deliberately covers the
+            // shell modes used for browser/WebXR entry. Video resume semantics
+            // need separate treatment because playback state should be
+            // preserved rather than restarted.
+            return self.mode == .home || self.mode == .desktop
+        }
+        externalActivityMonitor.onExternalSessionBecameActive = { [weak self] client in
+            self?.yieldToObservedExternalSession(client)
+        }
+        externalActivityMonitor.onExternalSessionEnded = { [weak self] client in
+            self?.resumeAfterObservedExternalSession(client)
+        }
+        externalActivityMonitor.onError = { error in
+            fputs("swiftxr-shell external activity monitor: \(error)\n", stderr)
+        }
+        externalActivityMonitor.start()
+
         model.commandHandler = { [weak self] command in
             guard let self else { return }
             switch command {
@@ -234,6 +260,7 @@ private final class SwiftXRShellAppDelegate: NSObject, NSApplicationDelegate {
     ) throws {
         guard mode == .home else { return }
 
+        resumeModeAfterObservedExternal = nil
         leaveHomeInput()
         mode = .external
 
@@ -280,8 +307,67 @@ private final class SwiftXRShellAppDelegate: NSObject, NSApplicationDelegate {
 
     private func returnHomeFromExternal() {
         guard mode == .external else { return }
+        resumeModeAfterObservedExternal = nil
         systemOverlay?.shutdown()
         finishReturningHome()
+    }
+
+    private func yieldToObservedExternalSession(_ client: XRMonadoClient) {
+        guard resumeModeAfterObservedExternal == nil else { return }
+        guard mode == .home || mode == .desktop else { return }
+
+        let previousMode = mode
+        switch previousMode {
+        case .home:
+            leaveHomeInput()
+        case .desktop:
+            // ScreenCaptureKit and the desktop renderer are unnecessary while
+            // another client owns the HMD. Stop them to reduce GPU/bandwidth
+            // load; the desktop itself (and Chromium window) remains untouched.
+            desktopMode?.deactivate()
+            removeDesktopEscapeMonitor()
+        case .video, .external:
+            return
+        }
+
+        systemOverlay?.shutdown()
+        resumeModeAfterObservedExternal = previousMode
+        mode = .external
+        print(
+            "[shell] yielding \(previousMode) to independently-started OpenXR client "
+                + "\(client.id): \(client.name)"
+        )
+    }
+
+    private func resumeAfterObservedExternalSession(_ client: XRMonadoClient) {
+        guard mode == .external, let previousMode = resumeModeAfterObservedExternal else {
+            return
+        }
+
+        resumeModeAfterObservedExternal = nil
+        mode = previousMode
+        NSApplication.shared.activate(ignoringOtherApps: true)
+
+        switch previousMode {
+        case .home:
+            homePanel?.interaction.movePointer(to: SIMD2<Float>(0.5, 0.5))
+            homePanel?.invalidate()
+            do {
+                try startHomePointerCaptureIfReady()
+            } catch {
+                fail(error)
+                return
+            }
+
+        case .desktop:
+            installDesktopEscapeMonitor()
+            desktopMode?.activate()
+
+        case .video, .external:
+            break
+        }
+
+        print("[shell] resumed \(previousMode) after \(client.name) left immersive XR")
     }
 
     private func finishReturningHome() {
@@ -346,6 +432,7 @@ private final class SwiftXRShellAppDelegate: NSObject, NSApplicationDelegate {
 
             if session.shouldExit {
                 systemOverlay?.shutdown()
+                externalActivityMonitor.shutdown()
                 externalLauncher.shutdown()
                 homePointerCapture?.stop()
                 videoMode?.shutdown()
@@ -492,6 +579,7 @@ private final class SwiftXRShellAppDelegate: NSObject, NSApplicationDelegate {
         guard !exitRequested else { return }
         exitRequested = true
         systemOverlay?.shutdown()
+        externalActivityMonitor.shutdown()
         externalLauncher.shutdown()
         homePointerCapture?.stop()
         videoMode?.shutdown()
@@ -515,6 +603,7 @@ private final class SwiftXRShellAppDelegate: NSObject, NSApplicationDelegate {
 
     private func fail(_ error: Error) {
         systemOverlay?.shutdown()
+        externalActivityMonitor.shutdown()
         externalLauncher.shutdown()
         homePointerCapture?.stop()
         videoMode?.shutdown()

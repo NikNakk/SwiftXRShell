@@ -23,8 +23,10 @@ The repository currently contains a runnable Home shell with built-in Video and 
 - explicit external application catalog;
 - `.app` bundle and raw executable launching;
 - Monado primary/focused-client handoff through SwiftXR's optional `libmonado` wrapper;
+- automatic handoff to independently-started immersive OpenXR sessions while Home or Desktop is active;
+- automatic restoration of the previous Home/Desktop mode when that immersive session ends;
 - an `XR_EXTX_overlay` system menu that can be opened over a launched application from a controller button;
-- automatic return to Home when the launched OpenXR client disconnects.
+- automatic return to Home when a Shell-launched OpenXR application stops presenting or disconnects.
 
 ## Build
 
@@ -82,7 +84,38 @@ See [`apps.example.json`](apps.example.json) for a larger example.
 
 The launcher uses `XRMonadoRuntimeControl` from SwiftXR rather than spawning `monado-ctl`. SwiftXR dynamically loads `libmonado.dylib`, snapshots the current Monado client list, launches the application, detects the new non-overlay OpenXR client, and makes it primary and focused.
 
-While the external application is primary, SwiftXR Shell remains connected and submits empty frames rather than rendering Home. When the external OpenXR client disappears, the Shell makes its original client primary/focused again and returns to Home.
+While the external application is primary, SwiftXR Shell remains connected and submits empty frames rather than rendering Home. Once a launched client's session has become active, the Shell restores itself when that session stops presenting even if the OpenXR client remains connected.
+
+### Independently-started immersive sessions
+
+SwiftXR Shell also watches Monado's client state for immersive sessions that were not launched by the Shell. This is intended for flows such as Chromium WebXR:
+
+```text
+SwiftXR Desktop
+      |
+      +-- Chromium window
+             |
+             +-- user selects Enter VR
+                      |
+                      v
+              Chromium sessionActive
+                      |
+                      v
+              Shell yields HMD
+                      |
+                 WebXR session
+                      |
+                 session ends
+                      |
+                      v
+              Shell restores Desktop
+```
+
+A connected OpenXR client by itself does **not** trigger a handoff. This is important for browsers, which may keep an OpenXR instance connected for device/runtime polling while no immersive WebXR session exists. The watcher waits for Monado's `sessionActive` state, makes that client primary/focused, and restores SwiftXR Shell as soon as the session becomes inactive or the client disappears.
+
+For the initial implementation, automatic handoff/resume is enabled from **Home and Desktop**. Desktop capture is stopped while the external application is presenting to avoid consuming GPU and ScreenCaptureKit resources, then restarted on return; the macOS desktop and browser window themselves are never closed or recreated. Video mode is deliberately excluded until playback-preserving suspend/resume semantics are added.
+
+Shell-launched applications continue to use the explicit launcher path, including process ownership and the optional system overlay. The automatic watcher is suppressed while that launcher path is active so the two mechanisms cannot race.
 
 SwiftXR searches for `libmonado.dylib` in this order:
 
@@ -157,6 +190,7 @@ SwiftXR Shell
 ├── integrated Video Player
 ├── integrated Virtual Desktop
 ├── external OpenXR application catalog + launch
+├── automatic external-session handoff (WebXR and other independently-started apps)
 └── persistent system environment
     ├── controller-triggered XR overlay
     │   ├── Resume

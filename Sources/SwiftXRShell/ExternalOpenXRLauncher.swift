@@ -45,6 +45,7 @@ final class ExternalOpenXRLauncher {
     private var baselineClientIDs = Set<UInt32>()
     private var shellClientID: UInt32?
     private var targetClientID: UInt32?
+    private var targetSessionWasActive = false
     private var launchDeadline = Date.distantPast
     private var currentApplication: ShellApplication?
 
@@ -84,6 +85,7 @@ final class ExternalOpenXRLauncher {
         baselineClientIDs = Set(clients.map(\.id))
         shellClientID = shellClient.id
         targetClientID = nil
+        targetSessionWasActive = false
         currentApplication = application
         launchDeadline = Date().addingTimeInterval(30)
 
@@ -220,7 +222,18 @@ final class ExternalOpenXRLauncher {
             let clients = try monado.refreshClients()
 
             if let targetClientID {
-                if !clients.contains(where: { $0.id == targetClientID }) {
+                guard let target = clients.first(where: { $0.id == targetClientID }) else {
+                    try restoreShell(using: clients)
+                    return
+                }
+
+                if target.state.contains(.sessionActive) {
+                    targetSessionWasActive = true
+                } else if targetSessionWasActive {
+                    // Some hosts (notably browsers) can keep their OpenXR
+                    // client/instance alive after an immersive session ends.
+                    // Restore the Shell when presentation stops rather than
+                    // waiting for the client process to disconnect.
                     try restoreShell(using: clients)
                 }
                 return
@@ -237,6 +250,7 @@ final class ExternalOpenXRLauncher {
                 try monado.setPrimary(clientID: target.id)
                 try monado.setFocused(clientID: target.id)
                 targetClientID = target.id
+                targetSessionWasActive = target.state.contains(.sessionActive)
                 print("[shell] handed HMD to Monado client \(target.id): \(target.name)")
                 onSwitchedToApplication?(target)
                 return
@@ -341,6 +355,7 @@ final class ExternalOpenXRLauncher {
         baselineClientIDs.removeAll()
         shellClientID = nil
         targetClientID = nil
+        targetSessionWasActive = false
         currentApplication = nil
         process = nil
         runningApplication = nil
