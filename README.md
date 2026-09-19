@@ -25,7 +25,8 @@ The repository currently contains a runnable Home shell with built-in Video and 
 - Monado primary/focused-client handoff through SwiftXR's optional `libmonado` wrapper;
 - automatic handoff to independently-started immersive OpenXR sessions while Home or Desktop is active;
 - automatic restoration of the previous Home/Desktop mode when that immersive session ends;
-- an `XR_EXTX_overlay` system menu that can be opened over a launched application from a controller button;
+- an `XR_EXTX_overlay` system dashboard over both Shell-launched and independently-started immersive applications;
+- Resume / Desktop / Home dashboard actions for independently-started sessions, with a temporary Home tile for resuming a still-active session;
 - automatic return to Home when a Shell-launched OpenXR application stops presenting or disconnects.
 
 ## Build
@@ -115,7 +116,9 @@ A connected OpenXR client by itself does **not** trigger a handoff. This is impo
 
 For the initial implementation, automatic handoff/resume is enabled from **Home and Desktop**. Desktop capture is stopped while the external application is presenting to avoid consuming GPU and ScreenCaptureKit resources, then restarted on return; the macOS desktop and browser window themselves are never closed or recreated. Video mode is deliberately excluded until playback-preserving suspend/resume semantics are added.
 
-Shell-launched applications continue to use the explicit launcher path, including process ownership and the optional system overlay. The automatic watcher is suppressed while that launcher path is active so the two mechanisms cannot race.
+Shell-launched applications continue to use the explicit launcher path, including process ownership. The automatic watcher is suppressed while that launcher path is active so the two mechanisms cannot race.
+
+When an independently-started session is foreground, SwiftXR Shell also prepares its `XR_EXTX_overlay` dashboard. Pressing the configured system-menu button can **Resume** the immersive application, switch to the integrated **Desktop**, or return to **Home**. Desktop/Home hand presentation back to the Shell without terminating the external OpenXR session. That client is then suppressed from automatic takeover and Home shows a temporary **Resume <application>** tile. Selecting it restores the still-active session as primary/focused. If the external session ends while suppressed, the tile disappears automatically.
 
 SwiftXR searches for `libmonado.dylib` in this order:
 
@@ -135,18 +138,20 @@ swift run swiftxr-shell
 
 ## System overlay
 
-When SwiftXR Shell launches an external XR application, it also creates a small independent OpenXR overlay session using `XR_EXTX_overlay`. The overlay normally submits no visible layer. Pressing the configured controller button displays a small head-locked menu over the foreground XR application.
+SwiftXR Shell creates a small independent OpenXR overlay session using `XR_EXTX_overlay` for foreground external applications. This now covers both applications launched from the Shell and independently-started sessions such as Chromium WebXR. The overlay normally submits no visible layer. Pressing the configured controller button displays a small head-locked system menu over the foreground XR application.
 
 The default trigger is `home`, which maps to `GCExtendedGamepad.buttonHome` and is intended to be the PS button on a DualSense controller. SwiftXR Shell enables GameController background monitoring while an external application has macOS foreground focus.
 
 The menu controls are:
 
 - configured trigger button: show/hide the overlay;
-- D-pad up/down: select Resume or Quit Application;
+- D-pad up/down: choose an action;
 - Cross / A: activate the selected action;
 - Circle / B: resume and hide the overlay.
 
-`Quit Application` asks the macOS process launched by SwiftXR Shell to terminate. When its Monado client disappears, the existing launcher handoff code restores SwiftXR Shell as primary/focused and returns to Home. The current implementation therefore quits applications launched by SwiftXR Shell; arbitrary OpenXR applications started outside the Shell are not yet process-managed.
+For applications launched by SwiftXR Shell, the actions are **Resume** and **Quit Application**. Quit asks the process owned by the Shell to terminate.
+
+For independently-started applications such as Chromium WebXR, the actions are **Resume**, **Desktop**, and **Home**. The Shell does not try to kill a process it does not own. Desktop/Home instead switch Monado primary/focus back to SwiftXR Shell while keeping the external OpenXR session alive and resumable.
 
 The first run creates:
 
@@ -192,9 +197,10 @@ SwiftXR Shell
 ├── external OpenXR application catalog + launch
 ├── automatic external-session handoff (WebXR and other independently-started apps)
 └── persistent system environment
-    ├── controller-triggered XR overlay
+    ├── controller-triggered XR dashboard
     │   ├── Resume
-    │   └── Quit Application
+    │   ├── Desktop / Home for independently-started sessions
+    │   └── Quit Application for Shell-launched sessions
     ├── Home
     ├── Settings
     └── Quit

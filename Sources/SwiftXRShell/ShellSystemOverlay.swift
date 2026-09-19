@@ -2,34 +2,66 @@ import GameController
 import SwiftUI
 import SwiftXR
 
+enum ShellSystemOverlayAction: Equatable {
+    case resume
+    case desktop
+    case home
+    case quitApplication
+
+    var title: String {
+        switch self {
+        case .resume: return "Resume"
+        case .desktop: return "Desktop"
+        case .home: return "Home"
+        case .quitApplication: return "Quit Application"
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .resume: return "play.fill"
+        case .desktop: return "desktopcomputer"
+        case .home: return "house.fill"
+        case .quitApplication: return "xmark.circle.fill"
+        }
+    }
+}
+
 @MainActor
 final class ShellSystemOverlayModel: ObservableObject {
     @Published var applicationTitle = "OpenXR application"
+    @Published var actions: [ShellSystemOverlayAction] = [.resume, .quitApplication]
     @Published var selectedIndex = 0
-    @Published var isQuitting = false
+    @Published var isPerformingAction = false
 
-    var onResume: (() -> Void)?
-    var onQuit: (() -> Void)?
+    var onAction: ((ShellSystemOverlayAction) -> Void)?
 
-    func reset(applicationTitle: String) {
+    func reset(
+        applicationTitle: String,
+        actions: [ShellSystemOverlayAction]
+    ) {
         self.applicationTitle = applicationTitle
+        self.actions = actions
         selectedIndex = 0
-        isQuitting = false
+        isPerformingAction = false
     }
 
     func moveSelection(_ delta: Int) {
-        guard !isQuitting else { return }
-        selectedIndex = max(0, min(1, selectedIndex + delta))
+        guard !isPerformingAction, !actions.isEmpty else { return }
+        selectedIndex = max(0, min(actions.count - 1, selectedIndex + delta))
     }
 
     func activateSelection() {
-        guard !isQuitting else { return }
-        if selectedIndex == 0 {
-            onResume?()
-        } else {
-            isQuitting = true
-            onQuit?()
+        guard
+            !isPerformingAction,
+            actions.indices.contains(selectedIndex)
+        else { return }
+
+        let action = actions[selectedIndex]
+        if action == .quitApplication {
+            isPerformingAction = true
         }
+        onAction?(action)
     }
 }
 
@@ -37,7 +69,7 @@ struct ShellSystemOverlayView: View {
     @ObservedObject var model: ShellSystemOverlayModel
 
     var body: some View {
-        VStack(spacing: 22) {
+        VStack(spacing: 20) {
             VStack(spacing: 6) {
                 Text("SwiftXR")
                     .font(.system(size: 20, weight: .semibold))
@@ -47,7 +79,7 @@ struct ShellSystemOverlayView: View {
                     .lineLimit(1)
             }
 
-            if model.isQuitting {
+            if model.isPerformingAction {
                 HStack(spacing: 12) {
                     ProgressView()
                     Text("Closing application…")
@@ -57,16 +89,13 @@ struct ShellSystemOverlayView: View {
                 .padding(.vertical, 18)
             } else {
                 VStack(spacing: 10) {
-                    choiceRow(
-                        title: "Resume",
-                        systemImage: "play.fill",
-                        selected: model.selectedIndex == 0
-                    )
-                    choiceRow(
-                        title: "Quit Application",
-                        systemImage: "xmark.circle.fill",
-                        selected: model.selectedIndex == 1
-                    )
+                    ForEach(Array(model.actions.enumerated()), id: \.offset) { index, action in
+                        choiceRow(
+                            title: action.title,
+                            systemImage: action.systemImage,
+                            selected: model.selectedIndex == index
+                        )
+                    }
                 }
             }
 
@@ -75,8 +104,8 @@ struct ShellSystemOverlayView: View {
                 .foregroundStyle(.secondary)
         }
         .padding(.horizontal, 34)
-        .padding(.vertical, 28)
-        .frame(width: 640, height: 330)
+        .padding(.vertical, 26)
+        .frame(width: 640, height: 410)
         .background(
             RoundedRectangle(cornerRadius: 30, style: .continuous)
                 .fill(Color.black.opacity(0.90))
@@ -107,7 +136,7 @@ struct ShellSystemOverlayView: View {
 
 @MainActor
 final class ShellSystemOverlayController {
-    var onQuitApplication: (() -> Void)?
+    var onAction: ((ShellSystemOverlayAction) -> Void)?
 
     private let triggerButton: ShellOverlayButton
     private let model = ShellSystemOverlayModel()
@@ -124,16 +153,22 @@ final class ShellSystemOverlayController {
 
     init(triggerButton: ShellOverlayButton) {
         self.triggerButton = triggerButton
-        model.onResume = { [weak self] in
-            self?.hide()
-        }
-        model.onQuit = { [weak self] in
-            self?.onQuitApplication?()
-            self?.panel?.invalidate()
+        model.onAction = { [weak self] action in
+            guard let self else { return }
+            if action == .resume {
+                self.hide()
+                return
+            }
+
+            self.onAction?(action)
+            self.panel?.invalidate()
         }
     }
 
-    func prepare(applicationTitle: String) throws {
+    func prepare(
+        applicationTitle: String,
+        actions: [ShellSystemOverlayAction] = [.resume, .quitApplication]
+    ) throws {
         shutdown()
 
         let instance = try XRInstance(
@@ -145,10 +180,10 @@ final class ShellSystemOverlayController {
         )
         let swapchain = try session.makeStereoSwapchain()
 
-        model.reset(applicationTitle: applicationTitle)
+        model.reset(applicationTitle: applicationTitle, actions: actions)
         let panel = try XRSwiftUIPanel(
             device: session.device,
-            pointSize: CGSize(width: 640, height: 330),
+            pointSize: CGSize(width: 640, height: 410),
             scale: 1
         ) {
             ShellSystemOverlayView(model: self.model)
@@ -180,9 +215,8 @@ final class ShellSystemOverlayController {
         ensureControllerConfigured()
     }
 
-    func quitRequestFailed() {
-        model.isQuitting = false
-        model.selectedIndex = 1
+    func actionRequestFailed() {
+        model.isPerformingAction = false
         panel?.invalidate()
     }
 
@@ -227,7 +261,9 @@ final class ShellSystemOverlayController {
     }
 
     private func show() {
-        guard session != nil, foregroundApplicationActive, !model.isQuitting else { return }
+        guard session != nil, foregroundApplicationActive, !model.isPerformingAction else {
+            return
+        }
         isVisible = true
         model.selectedIndex = 0
         panel?.invalidate()
@@ -236,7 +272,7 @@ final class ShellSystemOverlayController {
     }
 
     private func hide() {
-        guard isVisible, !model.isQuitting else { return }
+        guard isVisible, !model.isPerformingAction else { return }
         isVisible = false
         panel?.invalidate()
         installTriggerHandler()
@@ -270,7 +306,10 @@ final class ShellSystemOverlayController {
         pad.buttonB.pressedChangedHandler = nil
 
         guard let button = triggerInput(for: pad) else {
-            print("[overlay] configured trigger \(triggerButton.rawValue) is not available on this controller")
+            print(
+                "[overlay] configured trigger \(triggerButton.rawValue) "
+                    + "is not available on this controller"
+            )
             return
         }
         button.pressedChangedHandler = { [weak self] _, _, pressed in

@@ -30,6 +30,7 @@ private final class SwiftXRShellAppDelegate: NSObject, NSApplicationDelegate {
     private let externalLauncher = ExternalOpenXRLauncher()
     private let externalActivityMonitor = ExternalOpenXRActivityMonitor()
     private var systemOverlay: ShellSystemOverlayController?
+    private var shellModel: ShellModel?
     private var resumeModeAfterObservedExternal: Mode?
 
     private var exitRequested = false
@@ -88,6 +89,7 @@ private final class SwiftXRShellAppDelegate: NSObject, NSApplicationDelegate {
         let session = try instance.system().makeSession()
         let swapchain = try session.makeStereoSwapchain()
         let model = ShellModel()
+        self.shellModel = model
 
         let panel = try XRSwiftUIPanel(
             device: session.device,
@@ -126,8 +128,8 @@ private final class SwiftXRShellAppDelegate: NSObject, NSApplicationDelegate {
         let systemOverlay = ShellSystemOverlayController(
             triggerButton: settings.systemOverlayButton
         )
-        systemOverlay.onQuitApplication = { [weak self] in
-            self?.quitExternalApplicationFromOverlay()
+        systemOverlay.onAction = { [weak self] action in
+            self?.handleSystemOverlayAction(action)
         }
         self.systemOverlay = systemOverlay
 
@@ -172,6 +174,9 @@ private final class SwiftXRShellAppDelegate: NSObject, NSApplicationDelegate {
         externalActivityMonitor.onExternalSessionEnded = { [weak self] client in
             self?.resumeAfterObservedExternalSession(client)
         }
+        externalActivityMonitor.onSuppressedExternalSessionEnded = { [weak self] client in
+            self?.observedExternalSessionEndedWhileInShell(client)
+        }
         externalActivityMonitor.onError = { error in
             fputs("swiftxr-shell external activity monitor: \(error)\n", stderr)
         }
@@ -205,6 +210,8 @@ private final class SwiftXRShellAppDelegate: NSObject, NSApplicationDelegate {
             try enterVideo()
         case .virtualDesktop:
             enterDesktop()
+        case .resumeObservedExternal:
+            try resumeObservedExternalSession()
         case let .external(external):
             try enterExternal(application, external: external)
         }
@@ -269,7 +276,10 @@ private final class SwiftXRShellAppDelegate: NSObject, NSApplicationDelegate {
         // application. Overlay support is optional: a failure here should not
         // stop the requested XR application from launching.
         do {
-            try systemOverlay?.prepare(applicationTitle: application.title)
+            try systemOverlay?.prepare(
+                applicationTitle: application.title,
+                actions: [.resume, .quitApplication]
+            )
         } catch {
             systemOverlay?.shutdown()
             print("[overlay] unavailable for this launch: \(error)")
@@ -330,9 +340,22 @@ private final class SwiftXRShellAppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
-        systemOverlay?.shutdown()
+        shellModel?.clearResumeObservedExternal()
+        homePanel?.invalidate()
         resumeModeAfterObservedExternal = previousMode
         mode = .external
+
+        do {
+            try systemOverlay?.prepare(
+                applicationTitle: client.name,
+                actions: [.resume, .desktop, .home]
+            )
+            systemOverlay?.foregroundApplicationDidBecomeActive()
+        } catch {
+            systemOverlay?.shutdown()
+            print("[overlay] unavailable for observed external session: \(error)")
+        }
+
         print(
             "[shell] yielding \(previousMode) to independently-started OpenXR client "
                 + "\(client.id): \(client.name)"
@@ -344,6 +367,9 @@ private final class SwiftXRShellAppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
+        systemOverlay?.shutdown()
+        shellModel?.clearResumeObservedExternal()
+        homePanel?.invalidate()
         resumeModeAfterObservedExternal = nil
         mode = previousMode
         NSApplication.shared.activate(ignoringOtherApps: true)
@@ -370,6 +396,61 @@ private final class SwiftXRShellAppDelegate: NSObject, NSApplicationDelegate {
         print("[shell] resumed \(previousMode) after \(client.name) left immersive XR")
     }
 
+    private func observedExternalSessionEndedWhileInShell(_ client: XRMonadoClient) {
+        shellModel?.clearResumeObservedExternal()
+        homePanel?.invalidate()
+        print("[shell] \(client.name) ended its suppressed immersive session")
+    }
+
+    private func resumeObservedExternalSession() throws {
+        guard mode == .home else { return }
+        _ = try externalActivityMonitor.resumeSuppressedSession()
+    }
+
+    private func handleSystemOverlayAction(_ action: ShellSystemOverlayAction) {
+        switch action {
+        case .resume:
+            return
+
+        case .quitApplication:
+            quitExternalApplicationFromOverlay()
+
+        case .desktop, .home:
+            guard resumeModeAfterObservedExternal != nil else { return }
+
+            do {
+                let client = try externalActivityMonitor.returnForegroundSessionToShell()
+                systemOverlay?.shutdown()
+                resumeModeAfterObservedExternal = nil
+
+                shellModel?.showResumeObservedExternal(title: client.name)
+                homePanel?.invalidate()
+
+                // Any existing Desktop mode was suspended when the external
+                // session took over. Recreate it if Desktop was selected so
+                // ScreenCaptureKit starts from a clean state.
+                desktopMode?.deactivate()
+                desktopMode = nil
+                removeDesktopEscapeMonitor()
+
+                mode = .home
+                if action == .desktop {
+                    enterDesktop()
+                } else {
+                    finishReturningHome()
+                }
+
+                print(
+                    "[overlay] returned to SwiftXR \(action == .desktop ? "Desktop" : "Home"); "
+                        + "\(client.name) remains available to resume"
+                )
+            } catch {
+                systemOverlay?.actionRequestFailed()
+                fputs("swiftxr-shell overlay handoff: \(error)\n", stderr)
+            }
+        }
+    }
+
     private func finishReturningHome() {
         mode = .home
         NSApplication.shared.activate(ignoringOtherApps: true)
@@ -392,7 +473,7 @@ private final class SwiftXRShellAppDelegate: NSObject, NSApplicationDelegate {
             try externalLauncher.terminateForegroundApplication()
             print("[overlay] requested termination of \(title)")
         } catch {
-            systemOverlay?.quitRequestFailed()
+            systemOverlay?.actionRequestFailed()
             fputs("swiftxr-shell overlay quit: \(error)\n", stderr)
 
             let alert = NSAlert()
