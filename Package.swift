@@ -36,6 +36,7 @@ let package = Package(
                 .linkedFramework("CoreMedia"),
                 .linkedFramework("CoreVideo"),
                 .linkedFramework("GameController"),
+                .linkedFramework("Network"),
                 .linkedFramework("QuartzCore"),
                 .linkedFramework("ScreenCaptureKit"),
                 .linkedFramework("WebKit")

@@ -32,6 +32,9 @@ private final class SwiftXRShellAppDelegate: NSObject, NSApplicationDelegate {
     private var systemOverlay: ShellSystemOverlayController?
     private var shellModel: ShellModel?
     private var resumeModeAfterObservedExternal: Mode?
+    private var externalXRHandoffBridge: ExternalXRHandoffBridge?
+    private var cooperativeHandoffResumeMode: Mode?
+    private var cooperativeHandoffYielded = false
 
     private var exitRequested = false
 
@@ -63,6 +66,7 @@ private final class SwiftXRShellAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        externalXRHandoffBridge?.stop()
         systemOverlay?.shutdown()
         externalActivityMonitor.shutdown()
         externalLauncher.shutdown()
@@ -80,38 +84,9 @@ private final class SwiftXRShellAppDelegate: NSObject, NSApplicationDelegate {
         // button while the launched XR application owns macOS foreground focus.
         GCController.shouldMonitorBackgroundEvents = true
 
-        let capabilities = try XRRuntime.capabilities()
-        try capabilities.requireMetal()
-
-        let instance = try XRInstance(applicationName: "SwiftXR Shell")
-        print("Runtime: \(instance.runtime.name) \(instance.runtime.version)")
-
-        let session = try instance.system().makeSession()
-        let swapchain = try session.makeStereoSwapchain()
         let model = ShellModel()
         self.shellModel = model
-
-        let panel = try XRSwiftUIPanel(
-            device: session.device,
-            pointSize: CGSize(width: 1280, height: 720),
-            scale: 1
-        ) {
-            ShellHomeView(model: model)
-        }
-
-        let renderer = try ShellPanelRenderer(
-            device: session.device,
-            swapchain: swapchain,
-            panelTexture: panel.texture
-        )
-        let pointerCapture = XRMacPointerCapture(panel: panel)
-
-        self.instance = instance
-        self.session = session
-        self.swapchain = swapchain
-        self.homePanel = panel
-        self.homeRenderer = renderer
-        self.homePointerCapture = pointerCapture
+        try createShellXRPresentation(model: model)
 
         let settings: ShellSettings
         do {
@@ -182,6 +157,29 @@ private final class SwiftXRShellAppDelegate: NSObject, NSApplicationDelegate {
         }
         externalActivityMonitor.start()
 
+        let handoffBridge = ExternalXRHandoffBridge { [weak self] command, completion in
+            DispatchQueue.main.async {
+                guard let self else {
+                    completion(.failure(ExternalXRHandoffBridgeError.shellUnavailable))
+                    return
+                }
+
+                do {
+                    switch command {
+                    case .yield:
+                        try self.yieldXRForCooperativeHandoff()
+                    case .resume:
+                        try self.resumeXRFromCooperativeHandoff()
+                    }
+                    completion(.success(()))
+                } catch {
+                    completion(.failure(error))
+                }
+            }
+        }
+        try handoffBridge.start()
+        externalXRHandoffBridge = handoffBridge
+
         model.commandHandler = { [weak self] command in
             guard let self else { return }
             switch command {
@@ -202,6 +200,114 @@ private final class SwiftXRShellAppDelegate: NSObject, NSApplicationDelegate {
 
         print("SwiftXR Shell ready")
         print("Video and Desktop run in-process on the Shell OpenXR session")
+    }
+
+    private func createShellXRPresentation(model: ShellModel) throws {
+        let capabilities = try XRRuntime.capabilities()
+        try capabilities.requireMetal()
+
+        let instance = try XRInstance(applicationName: "SwiftXR Shell")
+        print("Runtime: \(instance.runtime.name) \(instance.runtime.version)")
+
+        let session = try instance.system().makeSession()
+        let swapchain = try session.makeStereoSwapchain()
+        let panel = try XRSwiftUIPanel(
+            device: session.device,
+            pointSize: CGSize(width: 1280, height: 720),
+            scale: 1
+        ) {
+            ShellHomeView(model: model)
+        }
+        let renderer = try ShellPanelRenderer(
+            device: session.device,
+            swapchain: swapchain,
+            panelTexture: panel.texture
+        )
+        let pointerCapture = XRMacPointerCapture(panel: panel)
+
+        self.instance = instance
+        self.session = session
+        self.swapchain = swapchain
+        self.homePanel = panel
+        self.homeRenderer = renderer
+        self.homePointerCapture = pointerCapture
+    }
+
+    /// Runtime-neutral handoff used by independently started WebXR clients.
+    ///
+    /// Unlike the Monado control path, this does not rely on runtime-specific
+    /// client switching. SwiftXR Shell releases its OpenXR instance entirely,
+    /// allowing another application to become the runtime's immersive client.
+    private func yieldXRForCooperativeHandoff() throws {
+        if cooperativeHandoffYielded {
+            return
+        }
+
+        guard mode == .home || mode == .desktop else {
+            throw ExternalXRHandoffBridgeError.shellBusy
+        }
+
+        let previousMode = mode
+        leaveHomeInput()
+        systemOverlay?.shutdown()
+        externalActivityMonitor.shutdown()
+
+        if previousMode == .desktop {
+            desktopMode?.deactivate()
+            desktopMode = nil
+            removeDesktopEscapeMonitor()
+        }
+
+        if session?.isRunning == true {
+            try? session?.requestExit()
+        }
+
+        // Drop every object that owns an OpenXR handle. XRSession and
+        // XRInstance destroy their native handles in deinit, making the
+        // cooperative handoff independent of the selected OpenXR runtime.
+        homePointerCapture?.stop()
+        homePointerCapture = nil
+        homeRenderer = nil
+        homePanel = nil
+        swapchain = nil
+        session = nil
+        instance = nil
+
+        cooperativeHandoffResumeMode = previousMode
+        cooperativeHandoffYielded = true
+        mode = .external
+
+        print("[shell] released OpenXR for cooperative external WebXR handoff")
+    }
+
+    private func resumeXRFromCooperativeHandoff() throws {
+        guard cooperativeHandoffYielded else {
+            return
+        }
+        guard let model = shellModel else {
+            throw ExternalXRHandoffBridgeError.shellUnavailable
+        }
+
+        let previousMode = cooperativeHandoffResumeMode ?? .home
+        try createShellXRPresentation(model: model)
+
+        cooperativeHandoffResumeMode = nil
+        cooperativeHandoffYielded = false
+        mode = .home
+
+        // Restore the Monado fast path if Monado is the selected runtime.
+        // start() is intentionally non-fatal on other runtimes.
+        externalActivityMonitor.start()
+
+        NSApplication.shared.activate(ignoringOtherApps: true)
+        homePanel?.interaction.movePointer(to: SIMD2<Float>(0.5, 0.5))
+        homePanel?.invalidate()
+
+        if previousMode == .desktop {
+            enterDesktop()
+        }
+
+        print("[shell] reacquired OpenXR after cooperative external WebXR handoff")
     }
 
     private func launch(_ application: ShellApplication) throws {
@@ -506,7 +612,13 @@ private final class SwiftXRShellAppDelegate: NSObject, NSApplicationDelegate {
 
     @objc
     private func frameStep() {
-        guard let session, let swapchain else { return }
+        guard let session, let swapchain else {
+            // During a cooperative external handoff SwiftXR Shell deliberately
+            // owns no OpenXR handles, but its macOS event loop and loopback
+            // handoff bridge must remain alive so the browser can return XR.
+            scheduleFrameStep(after: 0.02)
+            return
+        }
 
         do {
             try session.pollEvents()
@@ -659,6 +771,7 @@ private final class SwiftXRShellAppDelegate: NSObject, NSApplicationDelegate {
     private func requestSessionExitIfNeeded() throws {
         guard !exitRequested else { return }
         exitRequested = true
+        externalXRHandoffBridge?.stop()
         systemOverlay?.shutdown()
         externalActivityMonitor.shutdown()
         externalLauncher.shutdown()
@@ -683,6 +796,7 @@ private final class SwiftXRShellAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func fail(_ error: Error) {
+        externalXRHandoffBridge?.stop()
         systemOverlay?.shutdown()
         externalActivityMonitor.shutdown()
         externalLauncher.shutdown()

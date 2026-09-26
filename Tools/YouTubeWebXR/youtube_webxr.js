@@ -10,8 +10,29 @@
   let indexCount = 0;
   let activeVideo = null;
   let projectionMode = 3; // 3 = YouTube/FFmpeg EAC360, 1 = equirectangular 360.
+  let shellYielded = false;
 
   const log = (...args) => console.log('[SwiftXR YouTube WebXR]', ...args);
+
+  async function requestShellHandoff(action) {
+    if (!chrome?.runtime?.sendMessage) return false;
+
+    try {
+      const response = await chrome.runtime.sendMessage({
+        type: 'swiftxr-openxr-handoff',
+        action
+      });
+      if (!response?.ok) {
+        throw new Error(response?.error || 'SwiftXR Shell handoff failed');
+      }
+      return true;
+    } catch (error) {
+      // The extension is also useful without SwiftXR Shell running. In that
+      // case there is simply no cooperative handoff endpoint to contact.
+      log('SwiftXR Shell handoff unavailable:', error);
+      return false;
+    }
+  }
 
   function isWatchPage() {
     return location.pathname === '/watch' && new URL(location.href).searchParams.has('v');
@@ -38,7 +59,7 @@
 
     const button = document.createElement('button');
     button.id = BUTTON_ID;
-    button.textContent = '🥽 Stream in PSVR2';
+    button.textContent = '🥽 Stream in VR';
     Object.assign(button.style, {
       position: 'fixed',
       right: '24px',
@@ -79,7 +100,16 @@
     projectionMode = aspect > 1.72 ? 1 : 3;
 
     try {
-      setButtonState('Starting PSVR2…');
+      setButtonState('Releasing SwiftXR Shell…');
+      shellYielded = await requestShellHandoff('yield');
+
+      // xrDestroyInstance is synchronous, but give the runtime one macOS run
+      // loop turn to retire compositor ownership before Chromium requests XR.
+      if (shellYielded) {
+        await new Promise(resolve => setTimeout(resolve, 75));
+      }
+
+      setButtonState('Starting VR…');
       xrSession = await navigator.xr.requestSession('immersive-vr', {
         optionalFeatures: ['local-floor']
       });
@@ -109,8 +139,12 @@
       xrSession.requestAnimationFrame((time, frame) => renderXR(time, frame, referenceSpace));
     } catch (error) {
       log(error);
-      setButtonState('PSVR2 start failed', true);
+      setButtonState('VR start failed', true);
       xrSession = null;
+      if (shellYielded) {
+        shellYielded = false;
+        await requestShellHandoff('resume');
+      }
     }
   }
 
@@ -122,7 +156,12 @@
     vao = null;
     indexCount = 0;
     activeVideo = null;
-    setButtonState('🥽 Stream in PSVR2');
+    setButtonState('🥽 Stream in VR');
+
+    if (shellYielded) {
+      shellYielded = false;
+      requestShellHandoff('resume').catch(log);
+    }
   }
 
   function compileShader(type, source) {
