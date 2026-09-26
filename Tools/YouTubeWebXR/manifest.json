@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "SwiftXR YouTube WebXR",
-  "version": "0.2.0",
-  "description": "Streams live web video into generic macOS OpenXR WebXR without yt-dlp.",
+  "version": "0.3.0",
+  "description": "Streams live web video into generic macOS OpenXR WebXR with runtime-aware SwiftXR Shell handoff.",
   "content_scripts": [
     {
       "matches": [

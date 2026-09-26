@@ -35,6 +35,7 @@ private final class SwiftXRShellAppDelegate: NSObject, NSApplicationDelegate {
     private var externalXRHandoffBridge: ExternalXRHandoffBridge?
     private var cooperativeHandoffResumeMode: Mode?
     private var cooperativeHandoffYielded = false
+    private var currentOpenXRRuntimeName: String?
 
     private var exitRequested = false
 
@@ -166,12 +167,13 @@ private final class SwiftXRShellAppDelegate: NSObject, NSApplicationDelegate {
 
                 do {
                     switch command {
-                    case .yield:
-                        try self.yieldXRForCooperativeHandoff()
+                    case .prepare:
+                        let strategy = try self.prepareXRForExternalWebXR()
+                        completion(.success(strategy))
                     case .resume:
                         try self.resumeXRFromCooperativeHandoff()
+                        completion(.success("resumed"))
                     }
-                    completion(.success(()))
                 } catch {
                     completion(.failure(error))
                 }
@@ -225,12 +227,34 @@ private final class SwiftXRShellAppDelegate: NSObject, NSApplicationDelegate {
         )
         let pointerCapture = XRMacPointerCapture(panel: panel)
 
+        self.currentOpenXRRuntimeName = instance.runtime.name
         self.instance = instance
         self.session = session
         self.swapchain = swapchain
         self.homePanel = panel
         self.homeRenderer = renderer
         self.homePointerCapture = pointerCapture
+    }
+
+    /// Prefer Monado's existing runtime-managed client switching when
+    /// available. Other runtimes use the cooperative teardown/recreate path.
+    private func prepareXRForExternalWebXR() throws -> String {
+        let runtimeName = currentOpenXRRuntimeName ?? ""
+
+        if runtimeName.localizedCaseInsensitiveContains("monado") {
+            print(
+                "[handoff] Monado detected; preserving SwiftXR Shell OpenXR session "
+                    + "for runtime-managed handoff"
+            )
+            return "monado"
+        }
+
+        try yieldXRForCooperativeHandoff()
+        print(
+            "[handoff] cooperative handoff selected for runtime: "
+                + (runtimeName.isEmpty ? "<unknown>" : runtimeName)
+        )
+        return "cooperative"
     }
 
     /// Runtime-neutral handoff used by independently started WebXR clients.

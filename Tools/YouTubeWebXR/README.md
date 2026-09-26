@@ -40,10 +40,16 @@ The current WebGL experiment uses a standard `XRWebGLLayer`; it does not
 require WebXR Layers or any Monado-specific extension.
 
 When SwiftXR Shell is running, the extension coordinates runtime ownership over
-a loopback-only bridge on port 49375. Before Chromium requests an immersive
-session, the Shell destroys its OpenXR session and instance. When the browser
-session ends, the Shell recreates them. This is deliberately outside OpenXR so
-it works on runtimes that do not provide Monado's client-control API.
+a loopback-only bridge on port 49375. The Shell chooses the handoff strategy:
+
+- **Monado:** keep the Shell's OpenXR session alive and use the existing Monado
+  primary/focused client switching path.
+- **Other runtimes:** cooperatively destroy the Shell OpenXR session/instance
+  while Chromium owns immersive XR, then recreate them when WebXR ends.
+
+The browser invokes `requestSession("immersive-vr")` in the original click
+handler before awaiting the loopback round-trip so Chromium retains the
+transient user activation required for immersive WebXR.
 
 ## Load it
 

@@ -8,7 +8,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   }
 
   const action = message.action;
-  if (action !== 'yield' && action !== 'resume') {
+  if (action !== 'prepare' && action !== 'resume') {
     sendResponse({ok: false, error: 'invalid handoff action'});
     return false;
   }
@@ -25,7 +25,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       if (!response.ok) {
         throw new Error(body || `handoff HTTP ${response.status}`);
       }
-      sendResponse({ok: true});
+      sendResponse({ok: true, strategy: body || action});
     })
     .catch(error => {
       sendResponse({ok: false, error: String(error)});

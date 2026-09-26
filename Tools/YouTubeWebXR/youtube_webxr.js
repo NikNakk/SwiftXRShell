@@ -11,11 +11,14 @@
   let activeVideo = null;
   let projectionMode = 3; // 3 = YouTube/FFmpeg EAC360, 1 = equirectangular 360.
   let shellYielded = false;
+  let handoffStrategy = 'unavailable';
 
   const log = (...args) => console.log('[SwiftXR YouTube WebXR]', ...args);
 
   async function requestShellHandoff(action) {
-    if (!chrome?.runtime?.sendMessage) return false;
+    if (!chrome?.runtime?.sendMessage) {
+      return {ok: false, strategy: 'unavailable'};
+    }
 
     try {
       const response = await chrome.runtime.sendMessage({
@@ -25,12 +28,11 @@
       if (!response?.ok) {
         throw new Error(response?.error || 'SwiftXR Shell handoff failed');
       }
-      return true;
+      return response;
     } catch (error) {
-      // The extension is also useful without SwiftXR Shell running. In that
-      // case there is simply no cooperative handoff endpoint to contact.
+      // The extension is also useful without SwiftXR Shell running.
       log('SwiftXR Shell handoff unavailable:', error);
-      return false;
+      return {ok: false, strategy: 'unavailable', error: String(error)};
     }
   }
 
@@ -100,19 +102,35 @@
     projectionMode = aspect > 1.72 ? 1 : 3;
 
     try {
-      setButtonState('Releasing SwiftXR Shell…');
-      shellYielded = await requestShellHandoff('yield');
-
-      // xrDestroyInstance is synchronous, but give the runtime one macOS run
-      // loop turn to retire compositor ownership before Chromium requests XR.
-      if (shellYielded) {
-        await new Promise(resolve => setTimeout(resolve, 75));
-      }
+      const activationAtClick = navigator.userActivation?.isActive;
+      log('v0.3 click', {
+        activationAtClick,
+        video: video.videoWidth + 'x' + video.videoHeight,
+        projectionMode
+      });
 
       setButtonState('Starting VR…');
-      xrSession = await navigator.xr.requestSession('immersive-vr', {
+
+      // IMPORTANT: start the Shell handoff, but do not await it here. Immersive
+      // WebXR requires transient user activation. requestSession() must be
+      // invoked synchronously from this click before any asynchronous handoff
+      // round-trip can consume/expire that activation.
+      const handoffPromise = requestShellHandoff('prepare');
+      const sessionPromise = navigator.xr.requestSession('immersive-vr', {
         optionalFeatures: ['local-floor']
       });
+
+      log('requestSession invoked', {
+        activationStillActive: navigator.userActivation?.isActive
+      });
+
+      const handoff = await handoffPromise;
+      handoffStrategy = handoff?.strategy || 'unavailable';
+      shellYielded = handoffStrategy === 'cooperative';
+      log('handoff result', handoff);
+
+      xrSession = await sessionPromise;
+      log('immersive session created', {handoffStrategy});
       xrSession.addEventListener('end', onSessionEnded);
 
       gl = document.createElement('canvas').getContext('webgl2', {
@@ -145,6 +163,7 @@
         shellYielded = false;
         await requestShellHandoff('resume');
       }
+      handoffStrategy = 'unavailable';
     }
   }
 
@@ -162,6 +181,7 @@
       shellYielded = false;
       requestShellHandoff('resume').catch(log);
     }
+    handoffStrategy = 'unavailable';
   }
 
   function compileShader(type, source) {
@@ -389,6 +409,7 @@
       renderXR(time, nextFrame, referenceSpace));
   }
 
+  log('v0.3 content script loaded', location.href);
   installButton();
   new MutationObserver(installButton).observe(document.documentElement, {
     subtree: true,

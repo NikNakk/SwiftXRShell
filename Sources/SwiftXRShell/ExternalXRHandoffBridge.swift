@@ -27,11 +27,11 @@ enum ExternalXRHandoffBridgeError: Error, LocalizedError {
 /// transition outside OpenXR while keeping the actual runtime generic.
 final class ExternalXRHandoffBridge: @unchecked Sendable {
     enum Command {
-        case yield
+        case prepare
         case resume
     }
 
-    typealias Completion = (Result<Void, Error>) -> Void
+    typealias Completion = (Result<String, Error>) -> Void
     typealias Handler = (Command, @escaping Completion) -> Void
 
     static let port: UInt16 = 49375
@@ -115,8 +115,8 @@ final class ExternalXRHandoffBridge: @unchecked Sendable {
         }
 
         let command: Command
-        if request.hasPrefix("POST /yield ") {
-            command = .yield
+        if request.hasPrefix("POST /prepare ") {
+            command = .prepare
         } else if request.hasPrefix("POST /resume ") {
             command = .resume
         } else {
@@ -124,12 +124,14 @@ final class ExternalXRHandoffBridge: @unchecked Sendable {
             return
         }
 
+        print("[handoff] browser request: \(request.split(separator: " ").prefix(2).joined(separator: " "))")
         handler(command) { [weak self, weak connection] result in
             guard let self, let connection else { return }
             DispatchQueue.main.async {
                 switch result {
-                case .success:
-                    self.send(connection, status: 200, body: "ok")
+                case let .success(body):
+                    print("[handoff] browser request completed: \(body)")
+                    self.send(connection, status: 200, body: body)
                 case let .failure(error):
                     self.send(
                         connection,
