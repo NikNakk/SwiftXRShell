@@ -32,6 +32,7 @@ private final class SwiftXRShellAppDelegate: NSObject, NSApplicationDelegate {
     private var systemOverlay: ShellSystemOverlayController?
     private var shellModel: ShellModel?
     private var resumeModeAfterObservedExternal: Mode?
+    private var externalApplicationsEnabled = false
 
     private var exitRequested = false
 
@@ -151,8 +152,9 @@ private final class SwiftXRShellAppDelegate: NSObject, NSApplicationDelegate {
         externalActivityMonitor.onError = { error in
             fputs("swiftxr-shell external activity monitor: \(error)\n", stderr)
         }
-        externalActivityMonitor.start()
-
+        if externalApplicationsEnabled {
+            externalActivityMonitor.start()
+        }
 
         model.commandHandler = { [weak self] command in
             guard let self else { return }
@@ -183,6 +185,11 @@ private final class SwiftXRShellAppDelegate: NSObject, NSApplicationDelegate {
         let instance = try XRInstance(applicationName: "SwiftXR Shell")
         print("Runtime: \(instance.runtime.name) \(instance.runtime.version)")
 
+        externalApplicationsEnabled = canUseMonadoApplicationHandoff(
+            runtimeName: instance.runtime.name
+        )
+        model.setExternalApplicationsEnabled(externalApplicationsEnabled)
+
         let session = try instance.system().makeSession()
         let swapchain = try session.makeStereoSwapchain()
         let panel = try XRSwiftUIPanel(
@@ -207,6 +214,29 @@ private final class SwiftXRShellAppDelegate: NSObject, NSApplicationDelegate {
         self.homePointerCapture = pointerCapture
     }
 
+    private func canUseMonadoApplicationHandoff(runtimeName: String) -> Bool {
+        guard runtimeName.localizedCaseInsensitiveContains("monado") else {
+            print(
+                "[shell] external OpenXR application launch disabled: "
+                    + "active runtime is not Monado (\(runtimeName))"
+            )
+            return false
+        }
+
+        do {
+            let monado = try XRMonadoRuntimeControl()
+            _ = try monado.refreshClients()
+            print("[shell] Monado/libmonado application handoff available")
+            return true
+        } catch {
+            print(
+                "[shell] external OpenXR application launch disabled: "
+                    + "libmonado runtime control unavailable (\(error))"
+            )
+            return false
+        }
+    }
+
     private func launch(_ application: ShellApplication) throws {
         switch application.kind {
         case .videoPlayer:
@@ -216,6 +246,13 @@ private final class SwiftXRShellAppDelegate: NSObject, NSApplicationDelegate {
         case .resumeObservedExternal:
             try resumeObservedExternalSession()
         case let .external(external):
+            guard externalApplicationsEnabled else {
+                print(
+                    "[shell] ignored external application launch: "
+                        + "Monado/libmonado handoff is unavailable"
+                )
+                return
+            }
             try enterExternal(application, external: external)
         }
     }

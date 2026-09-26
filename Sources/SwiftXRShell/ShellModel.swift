@@ -61,6 +61,7 @@ final class ShellModel: ObservableObject {
         .videoPlayer,
         .virtualDesktop,
     ]
+    @Published private(set) var externalApplicationsEnabled = false
 
     var commandHandler: ((ShellCommand) -> Void)?
 
@@ -68,7 +69,19 @@ final class ShellModel: ObservableObject {
     private var resumeApplication: ShellApplication?
 
     func launch(_ application: ShellApplication) {
+        guard isLaunchEnabled(application) else { return }
         commandHandler?(.launch(application))
+    }
+
+    func isLaunchEnabled(_ application: ShellApplication) -> Bool {
+        if case .external = application.kind {
+            return externalApplicationsEnabled
+        }
+        return true
+    }
+
+    func setExternalApplicationsEnabled(_ enabled: Bool) {
+        externalApplicationsEnabled = enabled
     }
 
     func openSettings() {

@@ -56,12 +56,17 @@ struct ShellHomeView: View {
                 ScrollView {
                     LazyVGrid(columns: columns, alignment: .leading, spacing: 22) {
                         ForEach(model.applications) { application in
+                            let isEnabled = model.isLaunchEnabled(application)
                             Button {
                                 model.launch(application)
                             } label: {
-                                ShellApplicationTile(application: application)
+                                ShellApplicationTile(
+                                    application: application,
+                                    isEnabled: isEnabled
+                                )
                             }
                             .buttonStyle(.plain)
+                            .disabled(!isEnabled)
                         }
                     }
                     .padding(.vertical, 4)
@@ -86,6 +91,7 @@ struct ShellHomeView: View {
 @MainActor
 private struct ShellApplicationTile: View {
     let application: ShellApplication
+    let isEnabled: Bool
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -94,7 +100,7 @@ private struct ShellApplicationTile: View {
                     .font(.system(size: 44, weight: .semibold))
                     .foregroundStyle(.cyan)
                 Spacer()
-                Image(systemName: "arrow.up.right")
+                Image(systemName: isEnabled ? "arrow.up.right" : "lock.fill")
                     .font(.system(size: 18, weight: .semibold))
                     .foregroundStyle(.white.opacity(0.42))
             }
@@ -120,5 +126,6 @@ private struct ShellApplicationTile: View {
                 .stroke(.white.opacity(0.14), lineWidth: 1.5)
         )
         .contentShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+        .opacity(isEnabled ? 1 : 0.45)
     }
 }
