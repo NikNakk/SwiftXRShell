@@ -1,0 +1,13 @@
+{
+  "manifest_version": 3,
+  "name": "SwiftXR YouTube WebXR",
+  "version": "0.1.0",
+  "description": "Streams YouTube's live HTMLVideoElement into WebXR without yt-dlp.",
+  "content_scripts": [
+    {
+      "matches": ["https://www.youtube.com/*"],
+      "js": ["youtube_webxr.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}
