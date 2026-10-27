@@ -46,6 +46,14 @@ XR_RUNTIME_JSON=~/Code/monado/build-macos-psvr2-display/openxr_monado-dev.json \
 swift run swiftxr-shell
 ```
 
+To install it as `SwiftXR Shell.app` (in `/Applications`, or another folder given as an argument):
+
+```bash
+scripts/make-app.zsh
+```
+
+The app finds the runtime from the GUI environment or `/usr/local/share/openxr/1/active_runtime.json`, and still loads the OpenXR loader from `/usr/local/lib`. It is signed ad hoc unless `SIGN_IDENTITY` names a signing identity; with ad hoc signing, macOS may ask again for Screen Recording and Accessibility after each rebuild. Log output is visible when the app's executable is run from Terminal (`"/Applications/SwiftXR Shell.app/Contents/MacOS/swiftxr-shell"`).
+
 Move the mouse to point and click to activate a tile. Escape returns from a built-in mode to Home; Escape from Home exits the Shell.
 
 ## External OpenXR applications
