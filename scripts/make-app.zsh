@@ -4,8 +4,9 @@
 # Usage: scripts/make-app.zsh [DESTINATION_DIR]   (default /Applications)
 #
 # Environment:
-#   SIGN_IDENTITY  codesign identity (default "-", ad hoc). A stable identity
-#                  such as "Apple Development: …" keeps Screen Recording and
+#   SIGN_IDENTITY  codesign identity, or "-" for ad hoc. By default the one
+#                  valid "Apple Development" identity in the keychain, else ad
+#                  hoc. A stable identity keeps Screen Recording and
 #                  Accessibility permissions across rebuilds; ad hoc signing
 #                  changes on every build, so macOS may ask again.
 #   BUNDLE_ID      bundle identifier (default com.nickkennedy.swiftxr-shell)
@@ -20,7 +21,24 @@ destination=${1:-/Applications}
 name="SwiftXR Shell"
 executable=swiftxr-shell
 bundle_id=${BUNDLE_ID:-com.nickkennedy.swiftxr-shell}
-identity=${SIGN_IDENTITY:--}
+
+# The single valid Apple Development identity's SHA-1, or nothing when there
+# are none or several (then the choice is the user's, via SIGN_IDENTITY).
+apple_development_identity() {
+  local -a hashes
+  hashes=(${(f)"$(security find-identity -v -p codesigning 2>/dev/null \
+    | awk '/"Apple Development: / { print $2 }')"})
+  (( ${#hashes} == 1 )) && print -r -- $hashes[1]
+}
+
+if [[ -n ${SIGN_IDENTITY:-} ]]; then
+  identity=$SIGN_IDENTITY
+elif identity=$(apple_development_identity) && [[ -n $identity ]]; then
+  print "Signing with Apple Development identity $identity"
+else
+  identity=-
+  print "No single Apple Development identity found; signing ad hoc (set SIGN_IDENTITY to choose)"
+fi
 
 cd "$repo"
 
