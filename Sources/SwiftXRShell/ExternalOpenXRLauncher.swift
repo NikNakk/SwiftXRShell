@@ -47,6 +47,8 @@ final class ExternalOpenXRLauncher {
     private var targetClientID: UInt32?
     private var targetSessionWasActive = false
     private var launchDeadline = Date.distantPast
+    private var stopGracePeriod: TimeInterval = 2
+    private var stopRequested = false
     private var currentApplication: ShellApplication?
 
     private var process: Process?
@@ -87,7 +89,9 @@ final class ExternalOpenXRLauncher {
         targetClientID = nil
         targetSessionWasActive = false
         currentApplication = application
-        launchDeadline = Date().addingTimeInterval(30)
+        stopRequested = false
+        stopGracePeriod = external.stopGracePeriod
+        launchDeadline = Date().addingTimeInterval(external.openXRClientTimeout)
 
         if url.pathExtension.caseInsensitiveCompare("app") == .orderedSame {
             launchBundle(external)
@@ -99,6 +103,7 @@ final class ExternalOpenXRLauncher {
 
     func terminateForegroundApplication() throws {
         let title = currentApplication?.title ?? "OpenXR application"
+        stopRequested = true
 
         if let process {
             if process.isRunning {
@@ -195,7 +200,8 @@ final class ExternalOpenXRLauncher {
     private func scheduleForcedTermination() {
         terminationFallbackTask?.cancel()
         terminationFallbackTask = Task { @MainActor [weak self] in
-            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            let grace = self?.stopGracePeriod ?? 2
+            try? await Task.sleep(nanoseconds: UInt64(grace * 1_000_000_000))
             guard let self, !Task.isCancelled, self.currentApplication != nil else { return }
 
             if let process = self.process, process.isRunning {
@@ -253,6 +259,13 @@ final class ExternalOpenXRLauncher {
                 targetSessionWasActive = target.state.contains(.sessionActive)
                 print("[shell] handed HMD to Monado client \(target.id): \(target.name)")
                 onSwitchedToApplication?(target)
+                return
+            }
+
+            if launchedApplicationHasExited, stopRequested {
+                // Stopped from Home before it took the HMD: not an error.
+                print("[shell] \(application.title) stopped before creating an OpenXR client")
+                finishWithoutClient()
                 return
             }
 
@@ -320,6 +333,15 @@ final class ExternalOpenXRLauncher {
         onReturnedToShell?()
     }
 
+    private func finishWithoutClient() {
+        monitorTask?.cancel()
+        monitorTask = nil
+        terminationFallbackTask?.cancel()
+        terminationFallbackTask = nil
+        clearLaunchState()
+        onReturnedToShell?()
+    }
+
     private func fail(_ error: Error) {
         if let monado, let shellClientID {
             if let clients = try? monado.refreshClients(),
@@ -360,5 +382,7 @@ final class ExternalOpenXRLauncher {
         process = nil
         runningApplication = nil
         launchDeadline = .distantPast
+        stopGracePeriod = 2
+        stopRequested = false
     }
 }

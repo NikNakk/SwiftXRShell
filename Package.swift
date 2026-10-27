@@ -41,6 +41,17 @@ let package = Package(
                 .linkedFramework("ScreenCaptureKit"),
                 .linkedFramework("WebKit")
             ]
+        ),
+        .testTarget(
+            name: "SwiftXRShellTests",
+            dependencies: ["SwiftXRShell"],
+            linkerSettings: [
+                .unsafeFlags([
+                    "-L/usr/local/lib",
+                    "-Xlinker", "-rpath",
+                    "-Xlinker", "/usr/local/lib",
+                ], .when(platforms: [.macOS])),
+            ]
         )
     ]
 )
