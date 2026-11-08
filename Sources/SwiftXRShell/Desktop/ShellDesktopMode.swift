@@ -124,7 +124,7 @@ final class ShellDesktopMode {
         return min(max(width, minimumDesktopWidthMeters), maximumDesktopWidthMeters)
     }
 
-    private static func clearFrame(
+    static func clearFrame(
         frame: XRFrame,
         texture: any MTLTexture,
         commandBuffer: any MTLCommandBuffer

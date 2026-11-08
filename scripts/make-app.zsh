@@ -21,6 +21,7 @@ destination=${1:-/Applications}
 name="SwiftXR Shell"
 executable=swiftxr-shell
 bundle_id=${BUNDLE_ID:-com.nickkennedy.swiftxr-shell}
+icon_source="$repo/Resources/AppIcon.png"
 
 # The single valid Apple Development identity's SHA-1, or nothing when there
 # are none or several (then the choice is the user's, via SIGN_IDENTITY).
@@ -46,6 +47,10 @@ if [[ ! -d $destination ]]; then
   print -u2 "Destination folder does not exist: $destination"
   exit 1
 fi
+if [[ ! -f $icon_source ]]; then
+  print -u2 "App icon source is missing: $icon_source"
+  exit 1
+fi
 
 swift build -c release --product "$executable"
 binary=$(swift build -c release --show-bin-path)/$executable
@@ -61,6 +66,19 @@ app="$staging/$name.app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 cp "$binary" "$app/Contents/MacOS/$executable"
 
+# Build every standard macOS icon size from the checked-in 1024px artwork.
+# Keep intermediates inside staging so failures are cleaned up by the trap.
+iconset="$staging/AppIcon.iconset"
+mkdir -p "$iconset"
+for size in 16 32 128 256 512; do
+  sips -z "$size" "$size" "$icon_source" \
+    --out "$iconset/icon_${size}x${size}.png" >/dev/null
+  retina_size=$((size * 2))
+  sips -z "$retina_size" "$retina_size" "$icon_source" \
+    --out "$iconset/icon_${size}x${size}@2x.png" >/dev/null
+done
+iconutil -c icns "$iconset" -o "$app/Contents/Resources/AppIcon.icns"
+
 cat > "$app/Contents/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -70,6 +88,7 @@ cat > "$app/Contents/Info.plist" <<EOF
   <key>CFBundleDisplayName</key><string>$name</string>
   <key>CFBundleIdentifier</key><string>$bundle_id</string>
   <key>CFBundleExecutable</key><string>$executable</string>
+  <key>CFBundleIconFile</key><string>AppIcon.icns</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>$version</string>
   <key>CFBundleVersion</key><string>$build</string>
@@ -88,4 +107,15 @@ codesign --verify --strict "$app"
 target="$destination/$name.app"
 rm -rf "$target"
 mv "$app" "$target"
+
+# Register the final path after the swap. Apps/Finder may otherwise retain the
+# generic icon from an earlier installation, especially when the version is
+# unchanged. Touching the bundle also signals the replacement to file watchers.
+touch "$target"
+lsregister=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
+if [[ -x $lsregister ]]; then
+  if ! "$lsregister" -f "$target"; then
+    print -u2 "Warning: macOS app registration could not be refreshed for $target"
+  fi
+fi
 print "Installed $target ($version, build $build, signed: $identity)"

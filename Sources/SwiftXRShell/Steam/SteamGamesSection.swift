@@ -265,6 +265,7 @@ private struct SteamGameTile: View {
             .buttonStyle(.borderedProminent)
             .tint(.cyan)
             .disabled(!canLaunch)
+            .help(canLaunch ? "Launch \(game.name)" : "Launch requires Monado runtime control and no other app starting or running")
         } else {
             Button(action: onInstall) {
                 Label("Install", systemImage: "arrow.down.circle")

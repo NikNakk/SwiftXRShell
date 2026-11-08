@@ -134,7 +134,7 @@ final class VideoLibraryModel: ObservableObject {
     }
 
     func select(_ entry: VideoFileEntry) {
-        if let index = entries.firstIndex(of: entry) {
+        if let index = entries.firstIndex(of: entry), index != selectionIndex {
             selectionIndex = index
             ensureSelectionVisible()
         }

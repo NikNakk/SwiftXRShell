@@ -53,6 +53,20 @@ struct ShellHomeView: View {
                     .controlSize(.large)
                 }
 
+                if let error = model.launchError {
+                    HStack(alignment: .top) {
+                        Label(error, systemImage: "exclamationmark.triangle.fill")
+                            .font(.system(size: 14, weight: .medium))
+                            .foregroundStyle(.orange)
+                            .lineLimit(4)
+                        Spacer()
+                        Button("Dismiss") { model.launchError = nil }
+                            .buttonStyle(.bordered)
+                    }
+                    .padding(12)
+                    .background(RoundedRectangle(cornerRadius: 12).fill(.white.opacity(0.06)))
+                }
+
                 ScrollView {
                     LazyVGrid(columns: columns, alignment: .leading, spacing: 22) {
                         ForEach(model.applications) { application in
@@ -77,7 +91,12 @@ struct ShellHomeView: View {
                 }
 
                 HStack {
-                    Label("Move mouse to point • click to select • Esc to exit", systemImage: "cursorarrow.motionlines")
+                    Label(
+                        model.usesTrackedControllers
+                            ? "Aim to point • trigger to select • right stick to scroll • △ to recenter"
+                            : "Move mouse to point • click to select • Esc to exit",
+                        systemImage: model.usesTrackedControllers ? "hand.point.up.left.fill" : "cursorarrow.motionlines"
+                    )
                     Spacer()
                     Text("SwiftXR")
                         .fontWeight(.semibold)

@@ -1,14 +1,30 @@
 @preconcurrency import AVFoundation
 import AppKit
+import Combine
 import CoreMedia
 import Foundation
+import QuartzCore
 import SwiftXR
 
 @MainActor
 final class ShellVideoMode {
+    var onStatusChanged: (() -> Void)?
+    var mouseCaptureEnabled = true {
+        didSet { if !mouseCaptureEnabled { pointerCapture.stop() } }
+    }
+    var statusTitle: String {
+        switch libraryModel.mode {
+        case .files: return "Video library"
+        case .youtube: return "YouTube"
+        case .loading: return "Opening video…"
+        case .controls: return controlsModel.title
+        }
+    }
     private let session: XRSession
     private let swapchain: XRSwapchain
     private let onRequestHome: () -> Void
+    private let trackedInput: ShellTrackedInput
+    private var libraryObservation: AnyCancellable?
 
     private var mediaOpenTask: Task<Void, Never>?
     private var mediaOpenGeneration = 0
@@ -35,10 +51,12 @@ final class ShellVideoMode {
     init(
         session: XRSession,
         swapchain: XRSwapchain,
+        trackedInput: ShellTrackedInput,
         onRequestHome: @escaping () -> Void
     ) throws {
         self.session = session
         self.swapchain = swapchain
+        self.trackedInput = trackedInput
         self.onRequestHome = onRequestHome
         controller = VideoControllerInput()
 
@@ -74,6 +92,10 @@ final class ShellVideoMode {
         self.panel = panel
         self.panelRenderer = panelRenderer
         self.pointerCapture = pointerCapture
+        panel.refreshesOnPointerMovement = false
+        libraryObservation = library.objectWillChange.sink { [weak self, weak panel] _ in
+            DispatchQueue.main.async { panel?.invalidate(); self?.onStatusChanged?() }
+        }
 
         controls.commandHandler = { [weak self] command in
             guard let self else { return }
@@ -116,6 +138,7 @@ final class ShellVideoMode {
         mediaOpenTask = nil
         youtubeBrowser.close()
         pointerCapture.stop()
+        trackedInput.reset(interaction: panel.interaction)
         source?.pause()
         ambisonic?.pause()
         playbackStarted = false
@@ -127,12 +150,14 @@ final class ShellVideoMode {
     }
 
     func renderFrame() throws {
+        if session.state != .focused {
+            trackedInput.suspend(interaction: panel.interaction)
+            pointerCapture.stop()
+        }
         if pointerCapture.escapeRequested {
             onRequestHome()
             return
         }
-
-        try startPointerCaptureIfReady()
 
         if source != nil && !playbackStarted && libraryModel.mode != .loading {
             try startPlayback()
@@ -147,26 +172,45 @@ final class ShellVideoMode {
             )
         }
 
-        pointerCapture.poll()
-        try applyController(controller.poll())
-
         if libraryModel.mode == .youtube {
             youtubeBrowser.tick()
         }
 
         updatePanelVisibility()
         updateControlsModelIfNeeded()
-        try panel.refreshIfNeeded()
+        let refreshStarted = CACurrentMediaTime()
+        let refreshed = try panel.refreshIfNeeded()
+        ShellDiagnostics.shared.recordPanelUpdate(seconds: CACurrentMediaTime() - refreshStarted, refreshed: refreshed)
 
         let videoFrame = try source?.latestFrame()
         let currentRenderer = renderer
-        let showPanel = libraryModel.mode != .controls || panelVisible
         let presentation = panelPresentation(for: libraryModel.mode)
+        var trackedCommands = TrackedPanelCommands()
 
         let xrFrame = try session.renderFrame(to: swapchain) {
             frame,
             texture,
             commandBuffer in
+
+            ShellStageAnchor.shared.updateIfNeeded(from: frame)
+            trackedCommands = try trackedInput.update(
+                frame: frame, interaction: panel.interaction,
+                model: ShellStageAnchor.shared.modelMatrix(
+                    worldWidth: presentation.width,
+                    textureAspect: Float(panel.texture.width) / Float(panel.texture.height),
+                    distance: presentation.distance, verticalOffset: presentation.verticalOffset
+                ),
+                pointerEnabled: libraryModel.mode != .controls || panelVisible,
+                faceButtonsSelect: libraryModel.mode != .controls,
+                scrollEnabled: libraryModel.mode == .youtube
+            )
+            if trackedCommands.usesControllers || !trackedInput.isFocused {
+                pointerCapture.stop()
+            } else {
+                try startPointerCaptureIfReady()
+                pointerCapture.poll()
+            }
+            if trackedCommands.hasActivity && !trackedCommands.menu { notePanelActivity(redraw: false) }
 
             if let currentRenderer {
                 try currentRenderer.encode(
@@ -177,7 +221,7 @@ final class ShellVideoMode {
                 )
             }
 
-            if showPanel {
+            if libraryModel.mode != .controls || panelVisible {
                 try panelRenderer.encode(
                     frame: frame,
                     swapchainTexture: texture,
@@ -190,6 +234,11 @@ final class ShellVideoMode {
                     verticalOffset: presentation.verticalOffset
                 )
             }
+        }
+
+        if trackedInput.isFocused {
+            if trackedCommands.usesControllers { try applyTrackedCommands(trackedCommands) }
+            else { try applyController(controller.poll()) }
         }
 
         if let ambisonic,
@@ -282,6 +331,7 @@ final class ShellVideoMode {
                 self.playbackStarted = false
 
                 self.controlsModel.title = resolved.url.deletingPathExtension().lastPathComponent
+                self.onStatusChanged?()
                 _ = self.controlsModel.update(
                     isPlaying: false,
                     currentTime: 0,
@@ -345,7 +395,11 @@ final class ShellVideoMode {
     }
 
     private func handlePanelInteraction(_ event: XRPanelInteractionEvent) {
-        notePanelActivity()
+        switch event {
+        case .pointerMoved, .pointerMovedBy, .pointerExited:
+            if !trackedInput.usesControllers { notePanelActivity(redraw: false) }
+        default: notePanelActivity()
+        }
         guard libraryModel.mode == .youtube else { return }
 
         switch event {
@@ -418,6 +472,7 @@ final class ShellVideoMode {
             source.setVolume(value)
             ambisonic?.setVolume(value)
         case .recenter:
+            ShellStageAnchor.shared.requestRecenter()
             renderer.recenter()
             panelRenderer.recenter()
         case let .setProjection(mode):
@@ -505,7 +560,7 @@ final class ShellVideoMode {
             }
             if controls.back { onRequestHome() }
             if controls.togglePlay { try handle(.togglePlayback) }
-            if controls.seekSteps != 0 { try handle(.seekBy(Double(controls.seekSteps) * 15)) }
+            if controls.seekSteps != 0 { try handle(.seekBy(Double(controls.seekSteps) * 10)) }
             if controls.volumeSteps != 0, let source {
                 try handle(.setVolume(source.volume + Float(controls.volumeSteps) * 0.05))
             }
@@ -542,10 +597,32 @@ final class ShellVideoMode {
         if changed, libraryModel.mode == .controls, panelVisible { panel.invalidate() }
     }
 
-    private func notePanelActivity() {
+    private func applyTrackedCommands(_ commands: TrackedPanelCommands) throws {
+        if commands.seekSteps != 0 { try handle(.seekBy(Double(commands.seekSteps) * 10)) }
+        if commands.togglePlay && libraryModel.mode == .controls { try handle(.togglePlayback) }
+        if commands.recenter {
+            ShellStageAnchor.shared.requestRecenter()
+            if renderer != nil { try handle(.recenter) }
+        }
+        if commands.back {
+            if libraryModel.mode == .youtube {
+                if !youtubeBrowser.back() { leaveYouTubeToFiles() }
+            } else { onRequestHome() }
+        }
+        if commands.menu {
+            if libraryModel.mode == .controls {
+                panelVisible.toggle()
+                lastPanelActivity = Date()
+                panel.invalidate()
+            } else { onRequestHome() }
+        }
+    }
+
+    private func notePanelActivity(redraw: Bool = true) {
         lastPanelActivity = Date()
+        let wasVisible = panelVisible
         if libraryModel.mode == .controls { panelVisible = true }
-        panel.invalidate()
+        if redraw || !wasVisible { panel.invalidate() }
     }
 
     private func updatePanelVisibility() {
@@ -562,6 +639,9 @@ final class ShellVideoMode {
     private func startPointerCaptureIfReady() throws {
         guard
             NSApplication.shared.isActive,
+            mouseCaptureEnabled,
+            !trackedInput.usesControllers,
+            trackedInput.isFocused,
             session.isRunning,
             !pointerCapture.isCaptureRequested
         else { return }

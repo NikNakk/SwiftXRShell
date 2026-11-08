@@ -1,3 +1,4 @@
+import Foundation
 import simd
 import SwiftXR
 
@@ -20,11 +21,22 @@ final class ShellStageAnchor: @unchecked Sendable {
 
     private var pose: Pose?
     private var recenterRequested = false
+    private var recenterNotBefore: Int64?
+    private let lock = NSLock()
 
-    private init() {}
+    init() {}
+    private var revision: UInt64 = 0
 
-    func requestRecenter() {
+    var generation: UInt64 {
+        lock.lock(); defer { lock.unlock() }
+        return revision
+    }
+
+    func requestRecenter(atTime time: Int64? = nil) {
+        lock.lock()
+        defer { lock.unlock() }
         recenterRequested = true
+        recenterNotBefore = time
     }
 
     /// Capture a yaw-levelled stage from the current headset pose when a global
@@ -32,7 +44,6 @@ final class ShellStageAnchor: @unchecked Sendable {
     /// Shell panels remain vertical even if the user is looking slightly up,
     /// down or sideways when recentering.
     func updateIfNeeded(from frame: XRFrame) {
-        guard recenterRequested else { return }
         guard
             frame.views.count >= 2,
             frame.trackingState.orientationValid,
@@ -57,7 +68,15 @@ final class ShellStageAnchor: @unchecked Sendable {
             rightView.pose.position.y,
             rightView.pose.position.z
         )
-        let headPosition = (leftPosition + rightPosition) * 0.5
+        updateIfNeeded(headPosition: (leftPosition + rightPosition) * 0.5,
+                       orientation: orientation, predictedDisplayTime: frame.predictedDisplayTime)
+    }
+
+    func updateIfNeeded(headPosition: SIMD3<Float>, orientation: simd_quatf, predictedDisplayTime: Int64) {
+        lock.lock()
+        defer { lock.unlock() }
+        guard recenterRequested else { return }
+        if let recenterNotBefore, predictedDisplayTime < recenterNotBefore { return }
 
         let rawForward = orientation.act(SIMD3<Float>(0, 0, -1))
         var forward = SIMD3<Float>(rawForward.x, 0, rawForward.z)
@@ -76,6 +95,8 @@ final class ShellStageAnchor: @unchecked Sendable {
             forward: forward
         )
         recenterRequested = false
+        recenterNotBefore = nil
+        revision &+= 1
     }
 
     func modelMatrix(
@@ -84,6 +105,8 @@ final class ShellStageAnchor: @unchecked Sendable {
         distance: Float = ShellStageAnchor.defaultDistance,
         verticalOffset: Float = 0
     ) -> simd_float4x4 {
+        lock.lock()
+        defer { lock.unlock() }
         let worldHeight = worldWidth / max(textureAspect, 0.001)
 
         guard let pose else {

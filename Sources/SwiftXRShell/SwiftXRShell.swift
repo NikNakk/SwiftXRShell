@@ -1,7 +1,9 @@
 import AppKit
 import Combine
+import CVizBridge
 import Foundation
 import GameController
+import QuartzCore
 import SwiftUI
 import SwiftXR
 
@@ -11,21 +13,36 @@ private final class SwiftXRShellAppDelegate: NSObject, NSApplicationDelegate {
         case home
         case video
         case desktop
+        case browser
         case external
     }
 
-    private var mode: Mode = .home
+    private var mode: Mode = .home {
+        didSet { if mode != oldValue { updateCompanionWindow() } }
+    }
+    private var companionWindow: ShellCompanionWindow?
+    private var mouseCaptureEnabled = true
+    private var foregroundVRAppName: String?
+    private var startupError: String?
 
     private var instance: XRInstance?
     private var session: XRSession?
     private var swapchain: XRSwapchain?
+    private var trackedInput: ShellTrackedInput?
+    private var trackedEscapeMonitor: Any?
 
     private var homePanel: XRSwiftUIPanel<ShellHomeView>?
     private var homeRenderer: ShellPanelRenderer?
+    private var homeFrameLoop: HomeFrameLoop?
+    private var homeContentRevision = 0
     private var homePointerCapture: XRMacPointerCapture?
     private var configuredHomeController: GCController?
 
     private var videoMode: ShellVideoMode?
+    private var browserMode: (any ShellBrowserPresentation)?
+    private let browserApplication = BrowserApplication()
+    private let vizBrowserClient = VizBrowserClient()
+    private var browserHomeMonitor: Any?
     private var desktopMode: ShellDesktopMode?
     private var desktopEscapeMonitor: Any?
     private let externalLauncher = ExternalOpenXRLauncher()
@@ -37,8 +54,17 @@ private final class SwiftXRShellAppDelegate: NSObject, NSApplicationDelegate {
     private var modelObservations: Set<AnyCancellable> = []
 
     private var exitRequested = false
+    private var xrActivity: NSObjectProtocol?
+    private var referenceSpaceGeneration: UInt64 = 0
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        ShellDiagnostics.shared.startLogging()
+        let companion = ShellCompanionWindow()
+        companion.onAction = { [weak self] action in self?.handleCompanionAction(action) }
+        companionWindow = companion
+        companion.installMenus()
+        companion.showWindow(nil)
+        updateCompanionWindow()
         NSApplication.shared.activate(ignoringOtherApps: true)
         DispatchQueue.main.async {
             NSApplication.shared.activate(ignoringOtherApps: true)
@@ -48,7 +74,9 @@ private final class SwiftXRShellAppDelegate: NSObject, NSApplicationDelegate {
             try setUpShell()
             scheduleFrameStep()
         } catch {
-            fail(error)
+            startupError = String(describing: error)
+            fputs("[shell] startup connection unavailable: \(error)\n", stderr)
+            updateCompanionWindow()
         }
     }
 
@@ -57,7 +85,7 @@ private final class SwiftXRShellAppDelegate: NSObject, NSApplicationDelegate {
             switch mode {
             case .home:
                 try startHomePointerCaptureIfReady()
-            case .video, .desktop, .external:
+            case .video, .desktop, .browser, .external:
                 break
             }
         } catch {
@@ -66,14 +94,20 @@ private final class SwiftXRShellAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        stopHomeFrameLoop()
+        if let xrActivity { ProcessInfo.processInfo.endActivity(xrActivity) }
         systemOverlay?.shutdown()
         externalActivityMonitor.shutdown()
         externalLauncher.shutdown()
         shellModel?.steamLibrary.shutdown()
         removeDesktopEscapeMonitor()
+        if let trackedEscapeMonitor { NSEvent.removeMonitor(trackedEscapeMonitor) }
         homePointerCapture?.stop()
         videoMode?.shutdown()
         desktopMode?.deactivate()
+        browserMode?.deactivate()
+        vizBrowserClient.shutdown()
+        removeBrowserHomeMonitor()
         if session?.isRunning == true && !exitRequested {
             try? session?.requestExit()
         }
@@ -101,6 +135,18 @@ private final class SwiftXRShellAppDelegate: NSObject, NSApplicationDelegate {
         )
         self.shellModel = model
         try createShellXRPresentation(model: model)
+        trackedEscapeMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard let self, event.keyCode == 53,
+                  self.trackedInput?.usesControllers == true,
+                  self.mode == .home || self.mode == .video else { return event }
+            DispatchQueue.main.async {
+                if self.mode == .video { self.returnHome() }
+                else if self.mode == .home {
+                    do { try self.requestSessionExitIfNeeded() } catch { self.fail(error) }
+                }
+            }
+            return nil
+        }
         observeModelChanges(model)
         model.steamLibrary.reload()
 
@@ -126,6 +172,7 @@ private final class SwiftXRShellAppDelegate: NSObject, NSApplicationDelegate {
 
         externalLauncher.onSwitchedToApplication = { [weak self] client in
             guard let self else { return }
+            self.foregroundVRAppName = client.name
             print("[shell] external application is primary/focused: \(client.name)")
             if self.mode == .home {
                 // Started from Home with Home kept on screen until now.
@@ -152,7 +199,7 @@ private final class SwiftXRShellAppDelegate: NSObject, NSApplicationDelegate {
             // shell modes used for browser/WebXR entry. Video resume semantics
             // need separate treatment because playback state should be
             // preserved rather than restarted.
-            return self.mode == .home || self.mode == .desktop
+            return self.mode == .home || self.mode == .desktop || self.mode == .browser
         }
         externalActivityMonitor.onExternalSessionBecameActive = { [weak self] client in
             self?.yieldToObservedExternalSession(client)
@@ -192,6 +239,7 @@ private final class SwiftXRShellAppDelegate: NSObject, NSApplicationDelegate {
 
         print("SwiftXR Shell ready")
         print("Video and Desktop run in-process on the Shell OpenXR session")
+        updateCompanionWindow()
     }
 
     private func createShellXRPresentation(model: ShellModel) throws {
@@ -201,12 +249,15 @@ private final class SwiftXRShellAppDelegate: NSObject, NSApplicationDelegate {
         let instance = try XRInstance(applicationName: "SwiftXR Shell")
         print("Runtime: \(instance.runtime.name) \(instance.runtime.version)")
 
+        // Establish the primary session before opening a separate runtime-
+        // control connection, especially when launchd is starting Monado.
+        let session = try instance.system().makeSession()
         externalApplicationsEnabled = canUseMonadoApplicationHandoff(
             runtimeName: instance.runtime.name
         )
         model.setExternalApplicationsEnabled(externalApplicationsEnabled)
 
-        let session = try instance.system().makeSession()
+        let trackedInput = try ShellTrackedInput(session: session)
         let swapchain = try session.makeStereoSwapchain()
         let panel = try XRSwiftUIPanel(
             device: session.device,
@@ -221,9 +272,12 @@ private final class SwiftXRShellAppDelegate: NSObject, NSApplicationDelegate {
             panelTexture: panel.texture
         )
         let pointerCapture = XRMacPointerCapture(panel: panel)
+        panel.refreshesOnPointerMovement = false
+        panel.usesImmutableTextures = true
 
         self.instance = instance
         self.session = session
+        self.trackedInput = trackedInput
         self.swapchain = swapchain
         self.homePanel = panel
         self.homeRenderer = renderer
@@ -259,6 +313,10 @@ private final class SwiftXRShellAppDelegate: NSObject, NSApplicationDelegate {
             try enterVideo()
         case .virtualDesktop:
             enterDesktop()
+        case .browser:
+            try enterBrowser()
+        case .browserViz:
+            try enterBrowser(viz: true)
         case .resumeObservedExternal:
             try resumeObservedExternalSession()
         case let .external(external):
@@ -277,7 +335,8 @@ private final class SwiftXRShellAppDelegate: NSObject, NSApplicationDelegate {
         guard
             mode == .home,
             let session,
-            let swapchain
+            let swapchain,
+            let trackedInput
         else { return }
 
         leaveHomeInput()
@@ -285,11 +344,14 @@ private final class SwiftXRShellAppDelegate: NSObject, NSApplicationDelegate {
         let video = try ShellVideoMode(
             session: session,
             swapchain: swapchain,
+            trackedInput: trackedInput,
             onRequestHome: { [weak self] in
                 DispatchQueue.main.async { self?.returnHome() }
             }
         )
         videoMode = video
+        video.mouseCaptureEnabled = mouseCaptureEnabled
+        video.onStatusChanged = { [weak self] in self?.updateCompanionWindow() }
         mode = .video
         try video.activate()
     }
@@ -315,6 +377,34 @@ private final class SwiftXRShellAppDelegate: NSObject, NSApplicationDelegate {
         mode = .desktop
         desktop.activate()
         print("[shell] Desktop active — Escape returns to launcher")
+    }
+
+    private func enterBrowser(viz: Bool = false) throws {
+        guard mode == .home, let session, let swapchain, let trackedInput else { return }
+        // Build renderers before leaving Home so setup errors leave its input intact.
+        let requestHome: () -> Void = { [weak self] in DispatchQueue.main.async { self?.returnHome() } }
+        let failure: (Error) -> Void = { [weak self] error in
+            DispatchQueue.main.async {
+                guard let self, self.mode == .browser else { return }
+                self.returnHome()
+                self.shellModel?.launchError = error.localizedDescription
+            }
+        }
+        let browser: any ShellBrowserPresentation
+        if viz {
+            browser = try ShellVizBrowserMode(session: session, swapchain: swapchain, trackedInput: trackedInput,
+                client: vizBrowserClient, onRequestHome: requestHome, onFailure: failure)
+        } else {
+            browser = ShellBrowserMode(session: session, swapchain: swapchain, trackedInput: trackedInput,
+                browser: browserApplication, onRequestHome: requestHome, onFailure: failure)
+        }
+        leaveHomeInput()
+        browser.onStatusChanged = { [weak self] in self?.updateCompanionWindow() }
+        browserMode = browser
+        mode = .browser
+        installBrowserHomeMonitor()
+        browser.activate()
+        print("[shell] Browser \(viz ? "(Viz)" : "(window)") active — controller menu or ⇧⌘H returns Home")
     }
 
     private func enterExternal(
@@ -384,6 +474,10 @@ private final class SwiftXRShellAppDelegate: NSObject, NSApplicationDelegate {
             desktopMode?.deactivate()
             desktopMode = nil
             removeDesktopEscapeMonitor()
+        case .browser:
+            browserMode?.deactivate()
+            browserMode = nil
+            removeBrowserHomeMonitor()
         case .external:
             return
         case .home:
@@ -402,8 +496,9 @@ private final class SwiftXRShellAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func yieldToObservedExternalSession(_ client: XRMonadoClient) {
+        foregroundVRAppName = client.name
         guard resumeModeAfterObservedExternal == nil else { return }
-        guard mode == .home || mode == .desktop else { return }
+        guard mode == .home || mode == .desktop || mode == .browser else { return }
 
         let previousMode = mode
         switch previousMode {
@@ -415,6 +510,10 @@ private final class SwiftXRShellAppDelegate: NSObject, NSApplicationDelegate {
             // load; the desktop itself (and Chromium window) remains untouched.
             desktopMode?.deactivate()
             removeDesktopEscapeMonitor()
+        case .browser:
+            browserMode?.deactivate()
+            removeBrowserHomeMonitor()
+            if browserMode is ShellVizBrowserMode { installVizImmersiveKeyboardMonitor() }
         case .video, .external:
             return
         }
@@ -468,6 +567,10 @@ private final class SwiftXRShellAppDelegate: NSObject, NSApplicationDelegate {
             installDesktopEscapeMonitor()
             desktopMode?.activate()
 
+        case .browser:
+            installBrowserHomeMonitor()
+            browserMode?.activate()
+
         case .video, .external:
             break
         }
@@ -511,6 +614,9 @@ private final class SwiftXRShellAppDelegate: NSObject, NSApplicationDelegate {
                 desktopMode?.deactivate()
                 desktopMode = nil
                 removeDesktopEscapeMonitor()
+                browserMode?.deactivate()
+                browserMode = nil
+                removeBrowserHomeMonitor()
 
                 mode = .home
                 if action == .desktop {
@@ -531,6 +637,7 @@ private final class SwiftXRShellAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func finishReturningHome() {
+        foregroundVRAppName = nil
         mode = .home
         NSApplication.shared.activate(ignoringOtherApps: true)
         homePanel?.interaction.movePointer(to: SIMD2<Float>(0.5, 0.5))
@@ -573,11 +680,8 @@ private final class SwiftXRShellAppDelegate: NSObject, NSApplicationDelegate {
             finishReturningHome()
         }
 
-        let alert = NSAlert()
-        alert.alertStyle = .warning
-        alert.messageText = "Could not launch OpenXR application"
-        alert.informativeText = error.localizedDescription
-        alert.runModal()
+        shellModel?.launchError = error.localizedDescription
+        homePanel?.invalidate()
     }
 
     /// The Home panel only re-rasterizes on input or invalidate(); redraw it
@@ -586,26 +690,144 @@ private final class SwiftXRShellAppDelegate: NSObject, NSApplicationDelegate {
         let redraw: () -> Void = { [weak self] in
             // objectWillChange fires before the change; SwiftUI applies it on
             // the next pass of the run loop.
-            DispatchQueue.main.async { self?.homePanel?.invalidate() }
+            DispatchQueue.main.async {
+                self?.homeContentRevision += 1
+                self?.homePanel?.invalidate()
+                self?.updateCompanionWindow()
+            }
         }
         model.objectWillChange.sink { _ in redraw() }.store(in: &modelObservations)
         model.steamLibrary.objectWillChange.sink { _ in redraw() }.store(in: &modelObservations)
     }
 
+    private func updateCompanionWindow() {
+        let foreground: String
+        let detail: String
+        if session == nil {
+            foreground = startupError == nil ? "Connecting…" : "Headset unavailable"
+            detail = startupError == nil ? "Starting OpenXR" : "Mode → Connect / Retry Headset (⌘K)"
+        } else {
+            switch mode {
+            case .home:
+                foreground = "Home"
+                if let activity = shellModel?.externalActivity { detail = "Starting \(activity.title)…" }
+                else if shellModel?.launchError != nil { detail = "Launch failed — details are shown in Home" }
+                else { detail = "SwiftXR Shell" }
+            case .video:
+                foreground = "Video"
+                detail = videoMode?.statusTitle ?? "Video library"
+            case .desktop:
+                foreground = "Desktop"
+                detail = "Your Mac in VR"
+            case .browser:
+                foreground = browserMode is ShellVizBrowserMode ? "Browser (Viz)" : "Browser"
+                detail = browserMode?.status ?? "Chromium"
+            case .external:
+                foreground = foregroundVRAppName ?? externalLauncher.currentApplicationTitle ?? "VR application"
+                detail = "External OpenXR application"
+            }
+        }
+        companionWindow?.update(ShellCompanionStatus(
+            foreground: foreground, detail: detail,
+            runtime: instance?.runtime.name ?? startupError ?? "Starting OpenXR…",
+            input: mode == .browser ? "Sense pointer · physical keyboard · ⇧⌘H Home"
+                : trackedInput?.usesControllers == true ? "Sense / tracked controllers"
+                : mouseCaptureEnabled ? "Mouse fallback · ⇧⌘M releases capture" : "Desktop mouse released",
+            canGoHome: mode != .home && (mode != .external || resumeModeAfterObservedExternal != nil),
+            canSwitchModes: session != nil && mode != .external && shellModel?.externalActivity == nil,
+            canStopApp: externalLauncher.isRunningExternalApplication,
+            mouseCaptureEnabled: mouseCaptureEnabled,
+            canRetryConnection: session == nil
+        ))
+    }
+
+    private func handleCompanionAction(_ action: ShellCompanionWindow.Action) {
+        do {
+            switch action {
+            case .home:
+                if mode == .external { handleSystemOverlayAction(.home) } else { returnHome() }
+            case .video:
+                guard mode != .external && mode != .video else { return }
+                returnHome()
+                try enterVideo()
+            case .desktop:
+                guard mode != .external && mode != .desktop else { return }
+                returnHome()
+                enterDesktop()
+            case .browser:
+                guard mode != .external && mode != .browser else { return }
+                returnHome()
+                try enterBrowser()
+            case .recenter:
+                ShellStageAnchor.shared.requestRecenter()
+            case .stopApp:
+                stopExternalApplication()
+            case .toggleMouse:
+                mouseCaptureEnabled.toggle()
+                videoMode?.mouseCaptureEnabled = mouseCaptureEnabled
+                if !mouseCaptureEnabled { homePointerCapture?.stop() }
+                else if mode == .home { try startHomePointerCaptureIfReady() }
+            case .showWindow: break
+            case .retryConnection:
+                guard session == nil else { return }
+                startupError = nil
+                updateCompanionWindow()
+                do {
+                    modelObservations.removeAll()
+                    try setUpShell()
+                    scheduleFrameStep()
+                } catch {
+                    startupError = String(describing: error)
+                    fputs("[shell] reconnect failed: \(error)\n", stderr)
+                }
+            }
+        } catch { handleExternalLaunchError(error) }
+        updateCompanionWindow()
+    }
+
+    private func stopHomeFrameLoop() {
+        homeFrameLoop?.stop()
+        homeFrameLoop = nil
+    }
+
     private func leaveHomeInput() {
+        stopHomeFrameLoop()
         homePointerCapture?.stop()
+        if let homePanel { trackedInput?.reset(interaction: homePanel.interaction) }
         clearHomeControllerHandlers()
     }
 
     @objc
     private func frameStep() {
+        let frameStarted = CACurrentMediaTime()
         guard let session, let swapchain else {
             scheduleFrameStep(after: 0.02)
             return
         }
 
         do {
+            let needsActivity = mode != .external
+            if needsActivity && xrActivity == nil {
+                xrActivity = ProcessInfo.processInfo.beginActivity(
+                    options: [.userInitiatedAllowingIdleSystemSleep, .latencyCritical],
+                    reason: "Presenting an interactive OpenXR environment"
+                )
+            } else if !needsActivity, let xrActivity {
+                ProcessInfo.processInfo.endActivity(xrActivity)
+                self.xrActivity = nil
+            }
+            if mode == .home {
+                try serviceHomeUI(session: session, swapchain: swapchain)
+                ShellDiagnostics.shared.recordFrame(mode: "home UI", startedAt: frameStarted)
+                scheduleFrameStep(after: 1.0 / 120)
+                return
+            }
             try session.pollEvents()
+            if referenceSpaceGeneration != session.referenceSpaceChangeGeneration {
+                referenceSpaceGeneration = session.referenceSpaceChangeGeneration
+                ShellStageAnchor.shared.requestRecenter(atTime: session.referenceSpaceChangeTime)
+                print("[shell] following runtime reference-space reset")
+            }
 
             if session.shouldExit {
                 systemOverlay?.shutdown()
@@ -614,6 +836,9 @@ private final class SwiftXRShellAppDelegate: NSObject, NSApplicationDelegate {
                 homePointerCapture?.stop()
                 videoMode?.shutdown()
                 desktopMode?.deactivate()
+                browserMode?.deactivate()
+                vizBrowserClient.shutdown()
+                removeBrowserHomeMonitor()
                 NSApplication.shared.terminate(nil)
                 return
             }
@@ -632,46 +857,87 @@ private final class SwiftXRShellAppDelegate: NSObject, NSApplicationDelegate {
 
             switch mode {
             case .home:
-                try renderHome(session: session, swapchain: swapchain)
+                break // Home is driven by its dedicated XR worker above.
             case .video:
                 try videoMode?.renderFrame()
             case .desktop:
                 try desktopMode?.renderFrame()
+            case .browser:
+                try browserMode?.renderFrame()
             case .external:
                 _ = try session.nextFrame()
             }
 
+            ShellDiagnostics.shared.recordFrame(mode: String(describing: mode), startedAt: frameStarted)
             scheduleFrameStep()
         } catch {
             fail(error)
         }
     }
 
-    private func renderHome(session: XRSession, swapchain: XRSwapchain) throws {
-        guard
-            let panel = homePanel,
-            let renderer = homeRenderer,
-            let pointerCapture = homePointerCapture
-        else { return }
-
-        try startHomePointerCaptureIfReady()
-
-        if pointerCapture.escapeRequested {
-            try requestSessionExitIfNeeded()
-            return
+    private func serviceHomeUI(session: XRSession, swapchain: XRSwapchain) throws {
+        guard let panel = homePanel, let renderer = homeRenderer,
+              let pointerCapture = homePointerCapture, let trackedInput else { return }
+        if homeFrameLoop == nil {
+            let loop = HomeFrameLoop(session: session, swapchain: swapchain,
+                renderer: renderer, input: trackedInput.runtimeInput, texture: panel.texture,
+                onUpdates: { [weak self] updates in self?.handleHomeUpdates(updates) },
+                onError: { [weak self] error in
+                    guard let self, self.mode == .home else { return }
+                    self.fail(error)
+                })
+            homeFrameLoop = loop
+            loop.start()
         }
+        if pointerCapture.escapeRequested { try requestSessionExitIfNeeded(); return }
+        if trackedInput.isFocused && !trackedInput.usesControllers {
+            pointerCapture.poll()
+            if let pad = configuredHomeController?.extendedGamepad,
+               abs(pad.rightThumbstick.yAxis.value) > 0.18 {
+                panel.interaction.scroll(SIMD2(0, pad.rightThumbstick.yAxis.value / 120 * 4))
+            }
+        }
+        let refreshStarted = CACurrentMediaTime()
+        let refreshed = try panel.refreshIfNeeded()
+        ShellDiagnostics.shared.recordPanelUpdate(seconds: CACurrentMediaTime() - refreshStarted, refreshed: refreshed)
+        homeFrameLoop?.publish(texture: panel.texture, mousePointer: panel.interaction.pointerPosition,
+                               scrollInfo: panel.scrollInfo, contentRevision: homeContentRevision,
+                               mouseButtonDown: NSEvent.pressedMouseButtons != 0)
+    }
 
-        pointerCapture.poll()
-        configureHomeControllerIfNeeded(panel: panel)
-        try panel.refreshIfNeeded()
-        renderer.pointerPosition = panel.interaction.pointerPosition
-
-        _ = try session.renderFrame(to: swapchain) { frame, texture, commandBuffer in
-            try renderer.encode(
-                frame: frame,
-                texture: texture,
-                commandBuffer: commandBuffer
-            )
+    private func handleHomeUpdates(_ updates: [HomeFrameUpdate]) {
+        guard mode == .home, let panel = homePanel,
+              let pointerCapture = homePointerCapture, let trackedInput else { return }
+        for update in updates {
+            if update.shouldExit {
+                NSApplication.shared.terminate(nil)
+                return
+            }
+            if referenceSpaceGeneration != update.referenceGeneration {
+                referenceSpaceGeneration = update.referenceGeneration
+                ShellStageAnchor.shared.requestRecenter(atTime: update.referenceTime)
+                print("[shell] following runtime reference-space reset")
+            }
+            guard update.focused, let frame = update.frame, let controllers = update.controllers else {
+                trackedInput.suspend(interaction: panel.interaction)
+                pointerCapture.stop()
+                clearHomeControllerHandlers()
+                continue
+            }
+            let commands = trackedInput.apply(state: controllers, frame: frame,
+                interaction: panel.interaction,
+                model: ShellStageAnchor.shared.modelMatrix(worldWidth: 2.40, textureAspect: 1280.0 / 720))
+            if shellModel?.usesTrackedControllers != commands.usesControllers {
+                shellModel?.usesTrackedControllers = commands.usesControllers
+            }
+            if commands.recenter { ShellStageAnchor.shared.requestRecenter() }
+            if commands.usesControllers || !trackedInput.isFocused {
+                pointerCapture.stop()
+                clearHomeControllerHandlers()
+            } else {
+                do { try startHomePointerCaptureIfReady() } catch { fail(error); return }
+                configureHomeControllerIfNeeded(panel: panel)
+            }
         }
     }
 
@@ -720,6 +986,43 @@ private final class SwiftXRShellAppDelegate: NSObject, NSApplicationDelegate {
         configuredHomeController = nil
     }
 
+    private func installBrowserHomeMonitor() {
+        removeBrowserHomeMonitor()
+        // Chromium owns keyboard focus. Escape must remain available to dismiss
+        // browser UI and leave WebXR; use a separate global Home shortcut.
+        browserHomeMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard event.keyCode == 4,
+                  event.modifierFlags.intersection(.deviceIndependentFlagsMask) == [.command, .shift] else { return }
+            DispatchQueue.main.async { self?.returnHome() }
+        }
+    }
+
+    private func installVizImmersiveKeyboardMonitor() {
+        // A headless browser never becomes the Mac's foreground app. Continue
+        // delivering physical keys while its independent WebXR session presents.
+        removeBrowserHomeMonitor()
+        browserHomeMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .keyUp]) { [weak self] event in
+            guard let self, self.mode == .external,
+                  self.resumeModeAfterObservedExternal == .browser,
+                  self.browserMode is ShellVizBrowserMode else { return event }
+            if event.modifierFlags.contains(.command), event.keyCode == 12 { return event }
+            if event.type == .keyDown && event.keyCode == 4 &&
+                event.modifierFlags.intersection(.deviceIndependentFlagsMask) == [.command, .shift] {
+                DispatchQueue.main.async { self.handleSystemOverlayAction(.home) }
+                return nil
+            }
+            self.vizBrowserClient.send(kind: UInt32(event.type == .keyDown ? SXR_VIZ_KEY_DOWN : SXR_VIZ_KEY_UP), event: event)
+            return nil
+        }
+    }
+
+    private func removeBrowserHomeMonitor() {
+        if let browserHomeMonitor {
+            NSEvent.removeMonitor(browserHomeMonitor)
+            self.browserHomeMonitor = nil
+        }
+    }
+
     private func installDesktopEscapeMonitor() {
         removeDesktopEscapeMonitor()
         desktopEscapeMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) {
@@ -740,8 +1043,10 @@ private final class SwiftXRShellAppDelegate: NSObject, NSApplicationDelegate {
     private func startHomePointerCaptureIfReady() throws {
         guard
             mode == .home,
+            mouseCaptureEnabled,
+            trackedInput?.usesControllers != true,
+            trackedInput?.isFocused == true,
             NSApplication.shared.isActive,
-            session?.isRunning == true,
             let homePointerCapture,
             !homePointerCapture.isCaptureRequested
         else { return }
@@ -753,6 +1058,7 @@ private final class SwiftXRShellAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func requestSessionExitIfNeeded() throws {
+        stopHomeFrameLoop()
         guard !exitRequested else { return }
         exitRequested = true
         systemOverlay?.shutdown()
@@ -761,6 +1067,9 @@ private final class SwiftXRShellAppDelegate: NSObject, NSApplicationDelegate {
         homePointerCapture?.stop()
         videoMode?.shutdown()
         desktopMode?.deactivate()
+        browserMode?.deactivate()
+        vizBrowserClient.shutdown()
+        removeBrowserHomeMonitor()
 
         if session?.isRunning == true {
             try session?.requestExit()
@@ -779,12 +1088,16 @@ private final class SwiftXRShellAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func fail(_ error: Error) {
+        stopHomeFrameLoop()
         systemOverlay?.shutdown()
         externalActivityMonitor.shutdown()
         externalLauncher.shutdown()
         homePointerCapture?.stop()
         videoMode?.shutdown()
         desktopMode?.deactivate()
+        browserMode?.deactivate()
+        vizBrowserClient.shutdown()
+        removeBrowserHomeMonitor()
         removeDesktopEscapeMonitor()
         fputs("swiftxr-shell: \(error)\n", stderr)
 

@@ -78,10 +78,10 @@ final class VideoSource {
         }
 
         let duration = try await asset.load(.duration)
-        let pixelBufferAttributes: [String: Any] = [
+        let pixelBufferAttributes: [String: any Sendable] = [
             kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
             kCVPixelBufferMetalCompatibilityKey as String: true,
-            kCVPixelBufferIOSurfacePropertiesKey as String: [:],
+            kCVPixelBufferIOSurfacePropertiesKey as String: [String: Int](),
         ]
         let videoOutput = AVPlayerItemVideoOutput(pixelBufferAttributes: pixelBufferAttributes)
         let item = AVPlayerItem(asset: asset)

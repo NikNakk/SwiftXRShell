@@ -10,6 +10,7 @@ enum ExternalOpenXRLauncherError: Error, LocalizedError {
     case shellClientNotFound
     case openXRClientDidNotAppear(String)
     case launchedApplicationExited(String)
+    case executableFailed(title: String, status: Int32, detail: String)
     case couldNotTerminate(String)
 
     var errorDescription: String? {
@@ -26,6 +27,8 @@ enum ExternalOpenXRLauncherError: Error, LocalizedError {
             return "\(title) launched, but no new Monado OpenXR client appeared"
         case let .launchedApplicationExited(title):
             return "\(title) exited before creating an OpenXR client"
+        case let .executableFailed(title, status, detail):
+            return "\(title) could not start (exit \(status)).\n\(detail)"
         case let .couldNotTerminate(title):
             return "Could not terminate \(title)"
         }
@@ -52,6 +55,8 @@ final class ExternalOpenXRLauncher {
     private var currentApplication: ShellApplication?
 
     private var process: Process?
+    private var processOutput: Pipe?
+    private var outputTail = LaunchOutputTail()
     private var runningApplication: NSRunningApplication?
 
     var isRunningExternalApplication: Bool {
@@ -96,8 +101,13 @@ final class ExternalOpenXRLauncher {
         if url.pathExtension.caseInsensitiveCompare("app") == .orderedSame {
             launchBundle(external)
         } else {
-            try launchExecutable(external)
-            startMonitoring()
+            do {
+                try launchExecutable(external)
+                startMonitoring()
+            } catch {
+                clearLaunchState()
+                throw error
+            }
         }
     }
 
@@ -182,6 +192,18 @@ final class ExternalOpenXRLauncher {
         process.arguments = external.arguments
         process.environment = mergedEnvironment(overrides: external.environment)
         process.currentDirectoryURL = external.executableURL.deletingLastPathComponent()
+        let output = Pipe()
+        let tail = LaunchOutputTail()
+        outputTail = tail
+        output.fileHandleForReading.readabilityHandler = { handle in
+            let data = handle.availableData
+            guard !data.isEmpty else { handle.readabilityHandler = nil; return }
+            tail.append(data)
+            FileHandle.standardError.write(data)
+        }
+        process.standardOutput = output
+        process.standardError = output
+        processOutput = output
         try process.run()
         self.process = process
     }
@@ -270,6 +292,12 @@ final class ExternalOpenXRLauncher {
             }
 
             if launchedApplicationHasExited {
+                if let process, process.terminationStatus != 0 {
+                    throw ExternalOpenXRLauncherError.executableFailed(
+                        title: application.title, status: process.terminationStatus,
+                        detail: outputTail.summary
+                    )
+                }
                 throw ExternalOpenXRLauncherError.launchedApplicationExited(application.title)
             }
 
@@ -380,9 +408,31 @@ final class ExternalOpenXRLauncher {
         targetSessionWasActive = false
         currentApplication = nil
         process = nil
+        processOutput?.fileHandleForReading.readabilityHandler = nil
+        processOutput = nil
+        outputTail = LaunchOutputTail()
         runningApplication = nil
         launchDeadline = .distantPast
         stopGracePeriod = 2
         stopRequested = false
+    }
+}
+
+/// Bounded, thread-safe output capture; a child can emit more than a pipe's
+/// capacity without blocking and its actionable failure survives in Home.
+final class LaunchOutputTail: @unchecked Sendable {
+    private let lock = NSLock()
+    private var bytes = Data()
+
+    func append(_ data: Data) {
+        lock.lock(); defer { lock.unlock() }
+        bytes.append(data)
+        if bytes.count > 16_384 { bytes = Data(bytes.suffix(16_384)) }
+    }
+
+    var summary: String {
+        lock.lock(); defer { lock.unlock() }
+        let lines = String(decoding: bytes, as: UTF8.self).split(whereSeparator: \.isNewline)
+        return lines.suffix(4).joined(separator: "\n")
     }
 }

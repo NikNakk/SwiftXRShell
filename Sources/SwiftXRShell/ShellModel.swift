@@ -12,6 +12,8 @@ struct ShellApplication: Identifiable, Hashable, Sendable {
     enum Kind: Hashable, Sendable {
         case videoPlayer
         case virtualDesktop
+        case browser
+        case browserViz
         case resumeObservedExternal
         case external(ExternalOpenXRApplication)
     }
@@ -36,6 +38,22 @@ struct ShellApplication: Identifiable, Hashable, Sendable {
         subtitle: "View and control your Mac",
         systemImage: "desktopcomputer",
         kind: .virtualDesktop
+    )
+
+    static let browser = ShellApplication(
+        id: "swiftxr.browser",
+        title: "Browser",
+        subtitle: "Chromium, WebXR and the web",
+        systemImage: "globe",
+        kind: .browser
+    )
+
+    static let browserViz = ShellApplication(
+        id: "swiftxr.browser-viz",
+        title: "Browser (Viz)",
+        subtitle: "Compare offscreen Chromium · GPU surface",
+        systemImage: "rectangle.on.rectangle",
+        kind: .browserViz
     )
 
     static func resumeObservedExternal(title: String) -> ShellApplication {
@@ -78,9 +96,13 @@ struct ShellExternalActivity: Equatable, Sendable {
 
 @MainActor
 final class ShellModel: ObservableObject {
+    @Published var usesTrackedControllers = false
+    @Published var launchError: String?
     @Published private(set) var applications: [ShellApplication] = [
         .videoPlayer,
         .virtualDesktop,
+        .browser,
+        .browserViz,
     ]
     @Published private(set) var externalApplicationsEnabled = false
     /// The external app being started, running or stopped, if any.
@@ -100,6 +122,7 @@ final class ShellModel: ObservableObject {
 
     func launch(_ application: ShellApplication) {
         guard isLaunchEnabled(application) else { return }
+        launchError = nil
         commandHandler?(.launch(application))
     }
 
@@ -160,6 +183,8 @@ final class ShellModel: ObservableObject {
         }
         result.append(.videoPlayer)
         result.append(.virtualDesktop)
+        result.append(.browser)
+        result.append(.browserViz)
         result.append(contentsOf: externalApplications)
         applications = result
     }

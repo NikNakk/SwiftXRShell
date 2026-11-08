@@ -90,8 +90,8 @@ final class VideoControlPanelRenderer {
         let model = ShellStageAnchor.shared.modelMatrix(
             worldWidth: worldWidth,
             textureAspect: textureAspect,
-            distance: ShellStageAnchor.defaultDistance,
-            verticalOffset: 0
+            distance: distance,
+            verticalOffset: verticalOffset
         )
 
         for eye in 0..<2 {

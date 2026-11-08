@@ -16,19 +16,24 @@ private struct ShellPanelUniforms {
     var viewProjection: simd_float4x4
     var model: simd_float4x4
     var pointer: SIMD4<Float>
+    var scrollViewport: SIMD4<Float>
+    var scrollOffsets: SIMD4<Float>
 }
 
 final class ShellPanelRenderer {
     private let pipeline: any MTLRenderPipelineState
     private let vertexBuffer: any MTLBuffer
     private let vertexCount: Int
-    private let panelTexture: any MTLTexture
+    var panelTexture: any MTLTexture
     private let worldWidth: Float
     private let distance: Float
     private let placement: ShellPanelPlacement
     private let transparentBackground: Bool
 
     var pointerPosition: SIMD2<Float>?
+    var previousPanelTexture: (any MTLTexture)?
+    var scrollViewport = SIMD4<Float>.zero
+    var scrollOffsets = SIMD4<Float>.zero
 
     init(
         device: any MTLDevice,
@@ -130,7 +135,9 @@ final class ShellPanelRenderer {
                     pointer.y,
                     pointerPosition == nil ? 0 : 1,
                     textureAspect
-                )
+                ),
+                scrollViewport: scrollViewport,
+                scrollOffsets: scrollOffsets
             )
 
             encoder.setRenderPipelineState(pipeline)
@@ -147,6 +154,7 @@ final class ShellPanelRenderer {
                 index: 1
             )
             encoder.setFragmentTexture(panelTexture, index: 0)
+            encoder.setFragmentTexture(previousPanelTexture ?? panelTexture, index: 1)
             encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: vertexCount)
             encoder.endEncoding()
         }
@@ -189,7 +197,7 @@ final class ShellPanelRenderer {
         ))
     }
 
-    private static let shaderSource = """
+    static let shaderSource = """
     #include <metal_stdlib>
     using namespace metal;
 
@@ -202,6 +210,8 @@ final class ShellPanelRenderer {
         float4x4 viewProjection;
         float4x4 model;
         float4 pointer;
+        float4 scrollViewport;
+        float4 scrollOffsets;
     };
 
     struct ShellPanelVertexOut {
@@ -224,10 +234,25 @@ final class ShellPanelRenderer {
     fragment float4 shell_panel_fragment(
         ShellPanelVertexOut input [[stage_in]],
         constant ShellPanelUniforms &uniforms [[buffer(1)]],
-        texture2d<float> panel [[texture(0)]])
+        texture2d<float> panel [[texture(0)]],
+        texture2d<float> previousPanel [[texture(1)]])
     {
         constexpr sampler panelSampler(address::clamp_to_edge, filter::linear);
         float4 color = panel.sample(panelSampler, input.uv);
+        float4 rect = uniforms.scrollViewport;
+        if (uniforms.scrollOffsets.w > 0.5 &&
+            input.uv.x >= rect.x && input.uv.x < rect.x + rect.z &&
+            input.uv.y >= rect.y && input.uv.y < rect.y + rect.w) {
+            float2 currentUV = input.uv;
+            currentUV.y += (uniforms.scrollOffsets.z - uniforms.scrollOffsets.x) * rect.w;
+            float2 previousUV = input.uv;
+            previousUV.y += (uniforms.scrollOffsets.z - uniforms.scrollOffsets.y) * rect.w;
+            if (currentUV.y >= rect.y && currentUV.y < rect.y + rect.w) {
+                color = panel.sample(panelSampler, currentUV);
+            } else if (previousUV.y >= rect.y && previousUV.y < rect.y + rect.w) {
+                color = previousPanel.sample(panelSampler, previousUV);
+            }
+        }
 
         if (uniforms.pointer.z > 0.5) {
             float2 d = input.uv - uniforms.pointer.xy;

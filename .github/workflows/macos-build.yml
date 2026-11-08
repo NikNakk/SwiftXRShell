@@ -39,6 +39,7 @@ jobs:
             -S "$RUNNER_TEMP/OpenXR-SDK" \
             -B "$RUNNER_TEMP/OpenXR-SDK-build" \
             -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=14.0 \
             -DCMAKE_INSTALL_PREFIX=/usr/local \
             -DDYNAMIC_LOADER=ON \
             -DBUILD_TESTS=OFF

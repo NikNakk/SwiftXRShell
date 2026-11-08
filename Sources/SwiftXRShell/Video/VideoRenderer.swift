@@ -76,6 +76,7 @@ final class VideoRenderer {
     private let samplerState: any MTLSamplerState
     private let vertexBuffer: any MTLBuffer
     private var anchor: VideoProjectionAnchor?
+    private var stageGeneration: UInt64?
 
     init(
         device: any MTLDevice,
@@ -185,6 +186,13 @@ final class VideoRenderer {
     ) throws {
         guard frame.views.count >= 2 else { return }
 
+        ShellStageAnchor.shared.updateIfNeeded(from: frame)
+        let generation = ShellStageAnchor.shared.generation
+        if generation != stageGeneration {
+            anchor = nil
+            stageGeneration = generation
+        }
+
         if projectionMode != .flat,
            anchor == nil,
            frame.trackingState.orientationValid {
@@ -246,6 +254,7 @@ final class VideoRenderer {
         encoder.setRenderPipelineState(flatPipelineState)
         var uniforms = FlatVideoUniforms(
             viewProjection: frame.views[eye].viewProjectionMatrix(nearZ: 0.05, farZ: 50)
+                * ShellStageAnchor.shared.modelMatrix(worldWidth: 1, textureAspect: 1, distance: 0)
         )
         encoder.setVertexBuffer(vertexBuffer, offset: 0, index: 0)
         encoder.setVertexBytes(

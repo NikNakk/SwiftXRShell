@@ -11,15 +11,19 @@ let package = Package(
         .executable(name: "swiftxr-shell", targets: ["SwiftXRShell"])
     ],
     dependencies: [
-        .package(
-            url: "https://github.com/NikNakk/SwiftXR.git",
-            branch: "swiftxr-video-player-poc"
-        )
+        // Controller actions and pointer refresh changes are being developed
+        // together with the sibling SDK checkout.
+        .package(path: "../SwiftXR")
     ],
     targets: [
+        .target(
+            name: "CVizBridge",
+            linkerSettings: [.linkedFramework("IOSurface"), .linkedLibrary("bsm")]
+        ),
         .executableTarget(
             name: "SwiftXRShell",
             dependencies: [
+                "CVizBridge",
                 .product(name: "SwiftXR", package: "SwiftXR")
             ],
             linkerSettings: [

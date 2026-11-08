@@ -177,7 +177,8 @@ final class DesktopRenderer {
         frame: XRFrame,
         swapchainTexture: any MTLTexture,
         desktopTexture: (any MTLTexture)?,
-        commandBuffer: any MTLCommandBuffer
+        commandBuffer: any MTLCommandBuffer,
+        pointerPosition: SIMD2<Float>? = nil
     ) throws {
         guard frame.views.count >= 2 else { return }
 
@@ -238,6 +239,9 @@ final class DesktopRenderer {
                 )
                 encoder.setFragmentTexture(desktopTexture, index: 0)
                 encoder.setFragmentSamplerState(samplerState, index: 0)
+                var cursor = SIMD4<Float>(pointerPosition?.x ?? -10, pointerPosition?.y ?? -10,
+                                          geometry.aspectRatio, pointerPosition == nil ? 0 : 1)
+                encoder.setFragmentBytes(&cursor, length: MemoryLayout<SIMD4<Float>>.stride, index: 0)
                 encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
             }
 
@@ -245,7 +249,7 @@ final class DesktopRenderer {
         }
     }
 
-    private static let shaderSource = """
+    static let shaderSource = """
     #include <metal_stdlib>
     using namespace metal;
 
@@ -279,9 +283,16 @@ final class DesktopRenderer {
     fragment float4 desktop_fragment(
         DesktopVertexOut input [[stage_in]],
         texture2d<float> desktop [[texture(0)]],
-        sampler desktopSampler [[sampler(0)]])
+        sampler desktopSampler [[sampler(0)]],
+        constant float4 &cursor [[buffer(0)]])
     {
-        return desktop.sample(desktopSampler, input.uv);
+        float4 color = desktop.sample(desktopSampler, input.uv);
+        float2 offset = (input.uv - cursor.xy) * float2(cursor.z, 1.0);
+        float d = length(offset);
+        if (cursor.w > 0.5 && d < 0.009) {
+            return d < 0.0055 ? float4(0.15, 0.9, 1.0, 1.0) : float4(0.02, 0.04, 0.07, 1.0);
+        }
+        return color;
     }
     """
 }
